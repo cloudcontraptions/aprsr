@@ -27,6 +27,15 @@ cd aprsr
 make test          # Rust only — no Node needed
 ```
 
+`make ci` also runs a licence and advisory check, which needs one extra tool:
+
+```bash
+cargo install cargo-deny --locked
+```
+
+Without it that check is skipped, and `make ci` says so in a banner you cannot miss —
+CI still runs it, so a skip means CI can fail where you just passed.
+
 For the frontend you also need Node 22 or newer:
 
 ```bash
@@ -68,7 +77,7 @@ if it is stale.
 
 ## Before opening a pull request
 
-- [ ] `make ci` passes
+- [ ] `make ci` passes, with no SKIPPED banner
 - [ ] New behaviour has tests; new protocol behaviour cites its spec URL
 - [ ] No aprsc code was copied
 - [ ] `crates/aprsr-web/static/` regenerated if `web/` changed

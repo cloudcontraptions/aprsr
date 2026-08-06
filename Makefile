@@ -8,7 +8,7 @@ NPM   ?= npm
 WEB   := web
 
 .DEFAULT_GOAL := help
-.PHONY: help build test fmt fmt-check lint web web-check web-test clean ci run coverage assets-check
+.PHONY: help build test fmt fmt-check lint web web-check web-test clean ci run coverage assets-check deny
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -48,9 +48,24 @@ run: ## Run the server against aprsr.example.toml
 coverage: ## Line coverage report (needs cargo-llvm-cov)
 	$(CARGO) llvm-cov --workspace --all-features --html
 
+# Skipping is loud on purpose. This check was originally missing from `ci`, so a
+# green `make ci` reported success while the pipeline failed on a licence the
+# allow-list did not cover. A silent skip would recreate exactly that gap.
+deny: ## Licence and advisory check (CI; needs cargo-deny)
+	@if command -v cargo-deny >/dev/null 2>&1; then \
+		cargo-deny check; \
+	else \
+		echo "================================================================"; \
+		echo "SKIPPED: cargo-deny is not installed, so licences and advisories"; \
+		echo "were NOT checked. CI still runs this and can fail where you just"; \
+		echo "passed. Install it with:"; \
+		echo "    cargo install cargo-deny --locked"; \
+		echo "================================================================"; \
+	fi
+
 clean: ## Remove build artifacts
 	$(CARGO) clean
 	rm -rf $(WEB)/node_modules www/dist
 
-ci: fmt-check lint test web-check web-test assets-check ## Everything CI runs
+ci: fmt-check lint test deny web-check web-test assets-check ## Everything CI runs
 	@echo "ci: all checks passed"

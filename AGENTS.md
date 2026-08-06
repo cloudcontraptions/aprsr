@@ -76,6 +76,7 @@ the clock or the database, inject it: take `now: u64` as a parameter, or take a
 make ci            # everything CI runs — run this before you say you are done
 make test          # cargo test --workspace --all-features
 make lint          # clippy, warnings denied
+make deny          # licences and advisories (needs `cargo install cargo-deny --locked`)
 make fmt           # rustfmt
 make web           # rebuild the dashboard assets into crates/aprsr-web/static/
 make run           # run the server against aprsr.example.toml
@@ -185,7 +186,7 @@ What good tests look like here:
 
 ## 7. Before you finish
 
-- [ ] `make ci` passes
+- [ ] `make ci` passes — and it did not print the cargo-deny SKIPPED banner
 - [ ] New behaviour has tests; new protocol behaviour cites its spec URL
 - [ ] No aprsc code was copied
 - [ ] `crates/aprsr-web/static/` regenerated if `web/` changed

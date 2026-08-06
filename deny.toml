@@ -7,14 +7,20 @@ yanked = "deny"
 
 [licenses]
 version = 2
+# Every entry here is a licence actually present in the dependency tree — cargo-deny
+# warns about allow-list entries it never encounters, so an unused entry is a sign the
+# policy has drifted from reality rather than harmless slack.
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    # webpki-roots, reached through sqlx-core. It packages the Mozilla CA root store,
+    # which is data rather than code, and CDLA-Permissive-2.0 is the data-licence
+    # equivalent of a permissive software licence: no copyleft, no conditions on use.
+    "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
-    "MPL-2.0",
     "Unicode-3.0",
     "Zlib",
 ]

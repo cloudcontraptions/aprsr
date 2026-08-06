@@ -52,8 +52,10 @@ Prefer these over improvising; they encode the ordering that keeps the test suit
 
 ## Verifying your work
 
-`make ci` is the gate — it runs fmt, clippy, the Rust suite, the TypeScript type check
-and tests, and the stale-asset check. For a live smoke test:
+`make ci` is the gate — it runs fmt, clippy, the Rust suite, cargo-deny, the TypeScript
+type check and tests, and the stale-asset check. cargo-deny is a separate install
+(`cargo install cargo-deny --locked`); without it that one check is skipped behind a loud
+banner, and CI will still run it. For a live smoke test:
 
 ```bash
 cargo run -p aprsr -- run --config aprsr.example.toml &
