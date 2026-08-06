@@ -2,23 +2,44 @@
 
 {% block content %}
 <!--
-  Each panel is an HTMX polling target. The initial content is rendered server-side so the
-  page is complete on first paint, then swapped in place every few seconds.
+  Each panel is an HTMX target. The initial content is rendered server-side so the page is
+  complete on first paint, then swapped in place whenever the server's status stream says
+  something changed — `aprsr:status` is dispatched on <body> by src/ts/stream.ts.
+
+  The slow timer beside it is the fallback: a browser without EventSource, or a proxy that
+  will not hold a streaming response, still gets a page that updates, just less promptly.
+  With JavaScript off entirely the timer is all there is, and the page still works.
 -->
 <section
   id="summary"
   hx-get="/fragments/summary"
-  hx-trigger="every 5s"
+  hx-trigger="aprsr:status from:body, every 30s"
   hx-swap="outerHTML"
 >
   {{ summary_html|safe }}
+</section>
+
+<!--
+  History charts. Filled in by src/ts/charts.ts from /api/history; the empty state below is
+  what a reader sees with JavaScript off, which is honest rather than a broken-looking gap.
+-->
+<section id="history" class="mt-8">
+  <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
+    Last six hours
+  </h2>
+  <div data-charts class="grid grid-cols-2 gap-3 lg:grid-cols-4">
+    <p class="text-sm text-slate-500">
+      Charts need JavaScript. The current totals are above, and the full history is at
+      <a class="text-slate-400 hover:text-sky-400" href="/api/history?counter=packets_received">/api/history</a>.
+    </p>
+  </div>
 </section>
 
 <section
   id="listeners"
   class="mt-8"
   hx-get="/fragments/listeners"
-  hx-trigger="every 15s"
+  hx-trigger="aprsr:status from:body, every 60s"
   hx-swap="outerHTML"
 >
   {{ listeners_html|safe }}
@@ -28,7 +49,7 @@
   id="clients"
   class="mt-8"
   hx-get="/fragments/clients"
-  hx-trigger="every 5s"
+  hx-trigger="aprsr:status from:body, every 30s"
   hx-swap="outerHTML"
 >
   {{ clients_html|safe }}

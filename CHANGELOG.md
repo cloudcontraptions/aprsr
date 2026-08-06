@@ -27,6 +27,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whitespace before the filter sees it. It takes the rest of the line, and an expression that
   puts another filter after it is now an error rather than silently folding that filter into
   an object name.
+- **The dashboard updates when something happens, not on a timer.** Each status snapshot
+  from the server dispatches an event the panels listen for, so the page reflects the server
+  within a second instead of being up to five seconds stale and requesting whether or not
+  anything changed. The panels keep a slow timer as a fallback, so a browser without
+  `EventSource` — or a proxy that will not hold a streaming response — still updates, and the
+  page still works with JavaScript off entirely.
+- **History sparklines** over the last six hours, drawn from `/api/history`, and
+  **`GET /api/stations`** for plotting heard stations with a bounding box and a cap.
 - **Live streams, metrics and counter history.** `GET /events/status` pushes a snapshot a
   second over server-sent events instead of the dashboard polling three fragments;
   `GET /events/packets` carries the relayed feed itself. `GET /metrics` exposes the counters
