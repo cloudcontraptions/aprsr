@@ -53,7 +53,7 @@ jobs:
           test -f www/dist/CNAME || { echo "::error::www/dist/CNAME is missing"; exit 1; }
           echo "custom domain: $(cat www/dist/CNAME)"
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
 
       - uses: actions/upload-pages-artifact@v3
         with:
