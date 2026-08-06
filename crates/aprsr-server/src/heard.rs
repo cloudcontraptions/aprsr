@@ -34,7 +34,6 @@
 //! keeps this small is that an entry is only made for stations a *client* submitted, which is
 //! the traffic this server gated rather than everything crossing it.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -299,9 +298,6 @@ pub fn recipients(gated: &[ClientId], own_callsign: Option<ClientId>) -> Vec<Cli
     }
     out
 }
-
-/// The gated-station table is shared between the dispatch path and the maintenance task.
-pub type SharedHeard = Arc<Heard>;
 
 #[cfg(test)]
 mod tests {
