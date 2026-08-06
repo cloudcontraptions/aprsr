@@ -11,8 +11,9 @@ Update this file in the same change that moves an item.
   undecodable lines counted and skipped without dropping the connection.
 - **Login** — the full handshake, passcode verification, receive-only connections,
   per-connection filters from the login line.
-- **q constructs** — all ten codes, the client-to-server algorithm, and the reject rules
-  for `qAZ`, `qAC` without a TCPIP marker, self-loops and repeated callsigns.
+- **q constructs** — all ten codes, both halves of the algorithm (client-to-server and
+  server-to-server, including `qAS` and the `qAI` trace), and the reject rules for `qAZ`,
+  `qAC` without a TCPIP marker, self-loops and repeated callsigns.
 - **Filters** — `r/ p/ b/ o/ t/ s/ d/ a/ e/ g/ u/ q/ m/ f/`, additive with `-` negation,
   bounded against hostile input.
 - **Duplicate detection** — rolling window keyed on the transmission rather than the path.

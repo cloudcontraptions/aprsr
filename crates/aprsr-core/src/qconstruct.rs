@@ -182,27 +182,7 @@ pub fn apply_client(packet: &Tnc2Packet<'_>, ctx: &QContext<'_>) -> Result<QOutc
     let existing = find(path);
 
     // Rule 1 — rejection.
-    if let Some(found) = existing {
-        if found.code == QCode::Internal {
-            return Err(QReject::Internal);
-        }
-        if found.code == QCode::VerifiedClient && !path.has_tcpip() {
-            return Err(QReject::QacWithoutTcpip);
-        }
-        let loops_back = path
-            .hops()
-            .any(|h| h.offset > found.offset && h.call.eq_ignore_ascii_case(ctx.server_id));
-        if loops_back {
-            return Err(QReject::Loop {
-                server_id: ctx.server_id.to_owned(),
-            });
-        }
-    }
-    if let Some(call) = path.first_duplicate() {
-        return Err(QReject::DuplicateInPath {
-            call: call.to_owned(),
-        });
-    }
+    check_rejections(path, existing, ctx.server_id)?;
 
     // Rule 2 — UDP direct entry.
     if ctx.via_udp {
@@ -260,6 +240,137 @@ pub fn apply_client(packet: &Tnc2Packet<'_>, ctx: &QContext<'_>) -> Result<QOutc
         QCode::VerifiedClient
     };
     Ok(append(path, code, ctx.server_id))
+}
+
+/// Everything the server-to-server algorithm needs about the link a packet arrived on.
+///
+/// Deliberately a different type from [`QContext`] rather than a flag on it. The two
+/// algorithms disagree about what the same fact means: `via_udp` on a client connection
+/// means "a client submitted to a `udpsubmit` port", which earns `qAU`. Traffic from a peer
+/// server that happens to travel over UDP means nothing of the sort and must keep its
+/// existing construct. Sharing one context type with a boolean would make that confusion
+/// expressible; separate types make it impossible to write.
+#[derive(Debug, Clone, Copy)]
+pub struct QServerContext<'a> {
+    /// This server's own callsign — the `SERVERLOGIN` of the specification.
+    pub server_id: &'a str,
+    /// The callsign the *sending server* logged in as.
+    ///
+    /// Per <http://www.aprs-is.net/q.aspx>, "the callSSID following the qAS is the login or
+    /// IP address of the first identifiable server". aprsr always uses the login: the
+    /// specification marks the IP-address form deprecated.
+    pub peer_login: &'a str,
+}
+
+/// Apply the server-to-server q algorithm.
+///
+/// This is the half that runs for packets arriving over an uplink or a peer link, as
+/// opposed to [`apply_client`], which runs for packets a client submitted.
+///
+/// From <http://www.aprs-is.net/qalgorithm.aspx>, for a packet that "entered the server
+/// from an outbound connection" and carries no q construct:
+///
+/// 1. **Reject** on the same grounds as the client path — `qAZ`, a `qAC` whose path before
+///    the construct is not `TCPIP*`, this server already appearing after the construct, or
+///    a callsign-SSID repeated in the path.
+/// 2. **A header ending in `,I`** becomes `,qAr,VIACALL`. Always the lowercase `qAr`, never
+///    `qAR`: the uppercase form means the IGate was directly connected to *this* server, and
+///    a packet that reached us through another server by definition was not.
+/// 3. **An existing q construct is left alone.** The entry point onto APRS-IS has already
+///    been recorded by whichever server first saw the packet, and overwriting it would
+///    destroy the very information the construct exists to carry.
+/// 4. **Otherwise append `,qAS,<peer login>`** — "packet was received from another server".
+///
+/// Trace packets are handled separately: per the specification, "if trace is on, the q
+/// construct is qAI ... append `,login` ... then `,SERVERLOGIN`", so a `qAI` packet
+/// accumulates the identity of every server it passes through rather than being left as-is.
+pub fn apply_server(
+    packet: &Tnc2Packet<'_>,
+    ctx: &QServerContext<'_>,
+) -> Result<QOutcome, QReject> {
+    let path = packet.path();
+    let existing = find(path);
+
+    // Rule 1 — the same rejections as the client path. They are about the packet and the
+    // path, not about how it arrived, so both entry points must apply them.
+    check_rejections(path, existing, ctx.server_id)?;
+
+    // The trace construct is checked before rule 3, because a trace packet is exactly the
+    // case where an existing construct must *not* be left alone.
+    if let Some(found) = existing
+        && found.code == QCode::Trace
+    {
+        return Ok(append_trace(path, ctx.peer_login, ctx.server_id));
+    }
+
+    // Rule 2 — the legacy `,I` construct, reached through an intermediate server.
+    if let Some(igate) = path.i_construct() {
+        return Ok(rewrite_i_construct(path, QCode::RemoteIgate, igate));
+    }
+
+    // Rule 3 — an entry point is already recorded; leave it.
+    if let Some(found) = existing {
+        return Ok(unchanged(path, found.code));
+    }
+
+    // Rule 4 — record the server this packet came from.
+    Ok(append(path, QCode::Server, ctx.peer_login))
+}
+
+/// The rejection rules, which are identical whether a packet came from a client or a peer.
+///
+/// From the "Packets to be rejected" list at <http://www.aprs-is.net/qalgorithm.aspx>.
+fn check_rejections(
+    path: Path<'_>,
+    existing: Option<FoundQ<'_>>,
+    server_id: &str,
+) -> Result<(), QReject> {
+    if let Some(found) = existing {
+        // "if ,qAZ, is the q construct: Dump the packet to the reject log."
+        if found.code == QCode::Internal {
+            return Err(QReject::Internal);
+        }
+        // ",qAC, exists but full path before q construct is not TCPIP*."
+        if found.code == QCode::VerifiedClient && !path.has_tcpip() {
+            return Err(QReject::QacWithoutTcpip);
+        }
+        // ",SERVERLOGIN found after q construct" — this packet has been here before.
+        let loops_back = path
+            .hops()
+            .any(|h| h.offset > found.offset && h.call.eq_ignore_ascii_case(server_id));
+        if loops_back {
+            return Err(QReject::Loop {
+                server_id: server_id.to_owned(),
+            });
+        }
+    }
+
+    // "Same callsign-SSID appears twice in the q construct."
+    if let Some(call) = path.first_duplicate() {
+        return Err(QReject::DuplicateInPath {
+            call: call.to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Append this hop's identities to a trace packet.
+///
+/// Per <http://www.aprs-is.net/qalgorithm.aspx>: "Append `,login`" then "`,SERVERLOGIN`".
+/// The construct itself stays `qAI` so the next server continues the trace.
+fn append_trace(path: Path<'_>, peer_login: &str, server_id: &str) -> QOutcome {
+    let base = path.as_str();
+    let new_path = if base.is_empty() {
+        format!("{peer_login},{server_id}")
+    } else {
+        format!("{base},{peer_login},{server_id}")
+    };
+    QOutcome {
+        code: QCode::Trace,
+        path: new_path,
+        rewritten: true,
+    }
 }
 
 fn unchanged(path: Path<'_>, code: QCode) -> QOutcome {
@@ -593,6 +704,153 @@ mod tests {
             let Ok(out) = apply_client(&packet, &ctx("N0CALL")) else { return Ok(()) };
             let rendered = packet.with_path(&out.path);
             proptest::prop_assert!(Tnc2Packet::parse(&rendered).is_ok(), "{rendered}");
+        }
+    }
+}
+
+// --- the server-to-server algorithm ----------------------------------------------------
+
+#[cfg(test)]
+mod server_tests {
+    use super::*;
+    use rstest::rstest;
+
+    /// This server.
+    const SERVER: &str = "T2TEST";
+
+    /// The peer server these packets arrive from.
+    const PEER: &str = "T2FINLAND";
+
+    fn apply_from_server(raw: &str) -> Result<QOutcome, QReject> {
+        let packet = Tnc2Packet::parse(raw).expect("valid packet");
+        apply_server(
+            &packet,
+            &QServerContext {
+                server_id: SERVER,
+                peer_login: PEER,
+            },
+        )
+    }
+
+    /// A packet arriving from a peer with no construct records which server it came from.
+    ///
+    /// Per <http://www.aprs-is.net/qalgorithm.aspx>, a packet entering from an outbound
+    /// connection with no q construct gets `,qAS,` and the sending server's login.
+    #[test]
+    fn a_packet_from_a_peer_with_no_construct_gets_qas() {
+        let outcome =
+            apply_from_server("OH7LZB>APRS,TCPIP*:=6010.20N/02456.40E-Helsinki").expect("accepted");
+        assert_eq!(outcome.code, QCode::Server);
+        assert_eq!(outcome.path, "TCPIP*,qAS,T2FINLAND");
+        assert!(outcome.rewritten);
+    }
+
+    /// With an empty path there is nothing to append to, so the construct opens the path.
+    #[test]
+    fn qas_is_appended_even_when_the_path_is_empty() {
+        let outcome = apply_from_server("OH7LZB>APRS:>beacon").expect("accepted");
+        assert_eq!(outcome.path, "qAS,T2FINLAND");
+    }
+
+    /// Rule 3: the entry point was recorded by whichever server first saw the packet.
+    /// Overwriting it would destroy the only information the construct exists to carry.
+    #[rstest]
+    #[case("OH7LZB>APRS,TCPIP*,qAC,T2FINLAND:>beacon", QCode::VerifiedClient)]
+    #[case("OH7LZB>APRS,TCPIP*,qAS,T2GERMANY:>beacon", QCode::Server)]
+    #[case("OH7LZB>APRS,TCPIP*,qAo,SOMECALL:>beacon", QCode::GatedClientOnly)]
+    #[case("OH7LZB>APRS,TCPIP*,qAR,IGATECALL:>beacon", QCode::VerifiedIgate)]
+    fn an_existing_construct_is_left_alone(#[case] raw: &str, #[case] expected: QCode) {
+        let outcome = apply_from_server(raw).expect("accepted");
+        assert_eq!(outcome.code, expected);
+        assert!(
+            !outcome.rewritten,
+            "an unchanged path lets dispatch relay the original line"
+        );
+    }
+
+    /// Rule 2: always the lowercase `qAr`. The uppercase form means the IGate was directly
+    /// connected to *this* server, and a packet reaching us through another server was not.
+    #[test]
+    fn a_trailing_i_construct_from_a_server_becomes_lowercase_qar() {
+        let outcome =
+            apply_from_server("OH7LZB>APRS,TCPIP*,IGATECALL,I:>beacon").expect("accepted");
+        assert_eq!(outcome.code, QCode::RemoteIgate);
+        assert_eq!(outcome.path, "TCPIP*,qAr,IGATECALL");
+    }
+
+    /// The trap this whole split exists to prevent. Peer traffic that happened to travel
+    /// over UDP must never be re-tagged `qAU`, which means "a client submitted directly to
+    /// a udpsubmit port" — a completely different claim about where the packet entered.
+    #[test]
+    fn peer_traffic_is_never_tagged_as_direct_udp_entry() {
+        let outcome =
+            apply_from_server("OH7LZB>APRS,TCPIP*,qAC,T2GERMANY:>beacon").expect("accepted");
+        assert_ne!(outcome.code, QCode::Udp);
+        assert_eq!(outcome.code, QCode::VerifiedClient);
+    }
+
+    /// A trace accumulates the identity of every server it passes through: per the
+    /// specification, "append `,login`" then "`,SERVERLOGIN`".
+    #[test]
+    fn a_trace_packet_accumulates_each_server_it_passes() {
+        let outcome =
+            apply_from_server("OH7LZB>APRS,TCPIP*,qAI,T2GERMANY:>beacon").expect("accepted");
+        assert_eq!(outcome.code, QCode::Trace);
+        assert_eq!(outcome.path, "TCPIP*,qAI,T2GERMANY,T2FINLAND,T2TEST");
+        assert!(outcome.rewritten);
+    }
+
+    // --- rejections, which are about the packet and so apply on both paths --------------
+
+    #[test]
+    fn server_internal_traffic_is_rejected_from_a_peer_too() {
+        assert_eq!(
+            apply_from_server("OH7LZB>APRS,TCPIP*,qAZ,T2GERMANY:>internal").unwrap_err(),
+            QReject::Internal
+        );
+    }
+
+    /// If this server already appears after the construct, the packet has been here before.
+    #[test]
+    fn a_packet_that_already_passed_through_this_server_is_a_loop() {
+        assert_eq!(
+            apply_from_server("OH7LZB>APRS,TCPIP*,qAS,T2GERMANY,T2TEST:>beacon").unwrap_err(),
+            QReject::Loop {
+                server_id: "T2TEST".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_repeated_callsign_in_the_path_is_a_loop() {
+        assert_eq!(
+            apply_from_server("OH7LZB>APRS,T2GERMANY,TCPIP*,qAS,T2GERMANY:>beacon").unwrap_err(),
+            QReject::DuplicateInPath {
+                call: "T2GERMANY".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_qac_without_a_tcpip_marker_is_rejected() {
+        assert_eq!(
+            apply_from_server("OH7LZB>APRS,WIDE1-1,qAC,T2GERMANY:>beacon").unwrap_err(),
+            QReject::QacWithoutTcpip
+        );
+    }
+
+    // The rewritten path must still parse, or dispatch would drop the packet it just
+    // accepted. This has to hold for arbitrary peer logins, not only well-formed ones.
+    proptest::proptest! {
+        /// Whatever a peer calls itself, the algorithm must not panic or emit nonsense.
+        #[test]
+        fn accepted_paths_stay_parseable(peer in "[A-Z0-9-]{1,9}") {
+            let raw = "OH7LZB>APRS,TCPIP*:>beacon";
+            let packet = Tnc2Packet::parse(raw).expect("valid packet");
+            let ctx = QServerContext { server_id: "T2TEST", peer_login: &peer };
+            let Ok(outcome) = apply_server(&packet, &ctx) else { return Ok(()) };
+            let rebuilt = packet.with_path(&outcome.path);
+            proptest::prop_assert!(Tnc2Packet::parse(&rebuilt).is_ok());
         }
     }
 }
