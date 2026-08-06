@@ -136,10 +136,44 @@ callsign is a loop.
 
 ## Duplicate detection
 
-Rolling 30-second window, configurable with `limits.dupecheck_window`. The digest covers
-**source, destination and the information field** with trailing whitespace trimmed — not
-the path. One RF transmission heard by three IGates arrives three times with three
-different paths and is one transmission.
+Rolling 30-second window, configurable with `limits.dupecheck_window`. The window length is
+the specification's: per [ServerDesign](http://www.aprs-is.net/ServerDesign.aspx),
+"Duplicate checking is done over a 30 second sliding window for each packet."
+
+What is compared is also the specification's, verbatim:
+
+> "Duplicate checking is based on the origin call and SSID, destination call (SSID ignored),
+> data length, and data content. Note that the path is ignored in duplicate checking. The
+> origin and destination calls are case-sensitive."
+
+| Field | Compared as |
+|---|---|
+| Origin | With its SSID — `N0CALL-7` and `N0CALL-9` are different stations |
+| Destination | **Without** its SSID — gateways rewrite it, and two copies of one transmission can disagree about it |
+| Data length | Of the normalised content, so payloads of different lengths cannot collide |
+| Data content | Normalised, below |
+| Path | Not at all — one RF transmission heard by three IGates arrives three times with three different paths |
+
+### Normalisation
+
+> "Data content checking may be modified by non-compliant clients and servers by stripping
+> white space, non-printable characters, etc. Duplicate checking should take these factors
+> into account."
+
+aprsr removes **trailing whitespace** and **non-printable bytes** (below `0x20`, plus `DEL`;
+framing already refuses all but tab) before comparing.
+
+**Interior whitespace is never collapsed**, and that is a deliberate reading of a
+specification sentence that says only "white space". Interior spaces are load-bearing in
+APRS: position ambiguity (APRS101 chapter 6) blanks minute digits *with spaces*, so
+`4903.5 N` and `4903.50N` are two different positions reported to different precision.
+Suppressing one of those is a far worse failure than relaying a near-duplicate.
+
+**High bits are not normalised either.** The specification names whitespace and non-printable
+characters and says nothing about the high bit, and aprsr decodes payloads as UTF-8 — so a
+copy whose high bits were cleared by a 7-bit-clean gateway is a different, still-valid
+payload rather than a mangling of this one. Collapsing the two would be an invention, and it
+would suppress genuine packets that differ only in a multi-byte character.
 
 Time is passed in rather than read from a clock, and a timestamp that goes backwards is
 ignored, so a clock adjustment cannot rewind the window into re-admitting duplicates.

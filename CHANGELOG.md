@@ -283,7 +283,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The administrative endpoints require `http.admin_token` and are disabled entirely when it
   is unset, because the status interface has no other authentication.
 
-### Fixed (before "Decided" — this one is a real defect)
+### Fixed (before "Decided" — these are real defects)
+
+- **Duplicate detection compared the wrong fields.** aprsr hashed the destination callsign
+  *with* its SSID. [ServerDesign](http://www.aprs-is.net/ServerDesign.aspx) is explicit:
+  "Duplicate checking is based on the origin call and SSID, destination call (SSID ignored),
+  data length, and data content." The destination SSID carries routing intent that gateways
+  rewrite, so two copies of one transmission could disagree about it and both got relayed.
+
+  The data length is now hashed explicitly, as the specification names it, so two payloads of
+  different lengths cannot collide on content alone. Non-printable bytes are normalised away
+  alongside trailing whitespace, which is the rest of what the specification asks for:
+  "Data content checking may be modified by non-compliant clients and servers by stripping
+  white space, non-printable characters, etc."
+
+  Two things are deliberately **not** normalised, and both are documented in
+  `docs/protocol.md` with the reasoning. Interior whitespace, because position ambiguity
+  (APRS101 chapter 6) blanks minute digits with spaces — `4903.5 N` and `4903.50N` are
+  different positions, and collapsing them would suppress real traffic. And the high bit,
+  because the specification never mentions it and a payload with its high bits cleared is a
+  different valid UTF-8 payload rather than a mangled copy of this one. An earlier plan for
+  this work assumed the high-bit family was worth detecting; reading the specification says
+  otherwise.
 
 - **Several configured uplinks no longer all connect at once.** aprsr ran one supervisor per
   `[[uplink]]` entry, so two entries meant two simultaneous upstream connections.

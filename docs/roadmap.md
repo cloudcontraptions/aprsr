@@ -16,7 +16,11 @@ Update this file in the same change that moves an item.
   `qAC` without a TCPIP marker, self-loops and repeated callsigns.
 - **Filters** — `r/ p/ b/ o/ os/ t/ s/ d/ a/ e/ g/ u/ q/ m/ f/`, additive with `-` negation,
   bounded against hostile input.
-- **Duplicate detection** — rolling window keyed on the transmission rather than the path.
+- **Duplicate detection** — rolling window over exactly what
+  <http://www.aprs-is.net/ServerDesign.aspx> names: origin with SSID, destination without,
+  data length and normalised content, with the path ignored entirely. Trailing whitespace and
+  non-printable bytes are normalised away; interior whitespace deliberately is not, because
+  position ambiguity encodes precision with spaces.
 - **Gating rules** — packets marked `NOGATE`/`RFONLY`, third-party packets that have already
   been on APRS-IS, and general queries are refused at ingest.
 - **Ports** — `fullfeed` and `igate`, per-port forced filters, per-port client caps,
@@ -65,11 +69,6 @@ Update this file in the same change that moves an item.
 invalid. APRS is historically byte-transparent, so a comment field with high bytes is
 currently dropped rather than relayed. Fixing this means moving the packet types off `&str`
 onto `&[u8]`, which touches every parser in `aprsr-core`.
-
-**Duplicate-normalisation variants** — aprsr detects an exact repeat and one differing only
-by trailing whitespace. aprsc detects several more, including payloads that differ only in
-whether the high bit of each byte survived a gateway. Those are genuinely different packets
-to aprsr today, and both get relayed.
 
 ## Later
 
