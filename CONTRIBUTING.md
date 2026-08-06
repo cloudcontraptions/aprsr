@@ -75,6 +75,25 @@ with shared tokens in `web/src/css/theme.css`.
 **After touching anything under `web/`, run `make web` and commit the result** — CI fails
 if it is stale.
 
+## What CI checks
+
+Every pull request runs five checks, and all five must be green before it can merge:
+
+| Check | What it covers |
+|---|---|
+| `Rust (ubuntu-latest)` | fmt, clippy, the full test suite, release build |
+| `Rust (macos-latest)` | tests and release build |
+| `Rust (windows-latest)` | tests and release build |
+| `Frontend` | TypeScript type check, vitest, and that the committed assets are current |
+| `Licenses and advisories` | cargo-deny |
+
+aprsr is expected to run on all three platforms, so it is tested on all three rather than
+on Linux with the rest assumed. Formatting and clippy run only on Linux — they are
+platform-independent, and running them three times re-verifies a tautology.
+
+These names are matched literally by branch protection. Renaming a job silently detaches
+its required check, so treat them as a published interface.
+
 ## Before opening a pull request
 
 - [ ] `make ci` passes, with no SKIPPED banner

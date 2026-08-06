@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use aprsr_config::Config;
 use aprsr_core::filter::PositionSource;
+use aprsr_server::metrics::MetricsSnapshot;
 use aprsr_server::{Server, ServerState};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -97,6 +98,32 @@ impl TestServer {
             .map_or_else(|| panic!("no listener named {listener}"), |(_, addr)| *addr)
     }
 
+    /// Wait until exactly `count` clients hold registry entries.
+    ///
+    /// Registration happens after the login response is written, so a test that has read
+    /// the response cannot assume the sender is reachable by fan-out yet.
+    async fn clients_registered(&self, count: usize) {
+        wait_until(&format!("{count} client(s) to be registered"), || {
+            self.state.registry.len() == count
+        })
+        .await;
+    }
+
+    /// Wait until one counter reaches `expected`.
+    ///
+    /// The closure names the field so a timeout can say which counter never moved.
+    async fn metric_reaches(
+        &self,
+        name: &str,
+        expected: u64,
+        read: impl Fn(&MetricsSnapshot) -> u64,
+    ) {
+        wait_until(&format!("{name} to reach {expected}"), || {
+            read(&self.state.metrics.snapshot()) == expected
+        })
+        .await;
+    }
+
     async fn stop(mut self) {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
@@ -177,9 +204,61 @@ impl TestClient {
     }
 }
 
-/// Give the server a moment to finish work that has no observable completion signal.
-async fn settle() {
-    tokio::time::sleep(Duration::from_millis(50)).await;
+/// How often [`wait_until`] re-checks its condition.
+const POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+/// Block until an observable server-side condition holds.
+///
+/// Several assertions here depend on work the server finishes *after* it has already
+/// replied on the wire — registering a client, incrementing a counter, applying an in-band
+/// filter command. There is no wire signal for any of those, so a test that reads the login
+/// response and immediately asserts is racing the server.
+///
+/// This used to be a flat 50 ms sleep. That was enough on an unloaded Linux box and is not
+/// a safe assumption anywhere else: Windows' default timer granularity alone is around
+/// 15 ms, and CI runners are shared. Polling a real condition is both faster in the common
+/// case (typically one interval) and reliable in the slow one, and it fails with a message
+/// naming what never happened instead of an assertion that looks like a logic bug.
+async fn wait_until(what: &str, condition: impl FnMut() -> bool) {
+    wait_until_within(READ_TIMEOUT, what, condition).await;
+}
+
+/// [`wait_until`] with an explicit limit, so the timeout path itself can be tested quickly.
+async fn wait_until_within(limit: Duration, what: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        if condition() {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out after {limit:?} waiting for {what}"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+// --- the test harness itself -----------------------------------------------------------
+
+/// The waiting helper has to fail, not hang, when the thing never happens — otherwise a
+/// genuine regression would look like a stuck CI job rather than a red test.
+#[tokio::test]
+#[should_panic(expected = "waiting for something that never happens")]
+async fn waiting_for_a_condition_that_never_holds_fails_with_a_message() {
+    wait_until_within(
+        Duration::from_millis(50),
+        "something that never happens",
+        || false,
+    )
+    .await;
+}
+
+/// A condition that already holds must not cost even one poll interval.
+#[tokio::test]
+async fn waiting_for_a_condition_that_already_holds_returns_immediately() {
+    let started = tokio::time::Instant::now();
+    wait_until("a condition that is already true", || true).await;
+    assert!(started.elapsed() < POLL_INTERVAL);
 }
 
 // --- handshake -----------------------------------------------------------------------
@@ -231,8 +310,9 @@ async fn an_incorrect_passcode_is_acknowledged_as_unverified() {
 
     let (_, response) = client.login("user N0CALL pass 1 vers aprsr-test 0.1").await;
     assert_eq!(response, "# logresp N0CALL unverified, server T2TEST");
-    settle().await;
-    assert_eq!(server.state.metrics.snapshot().logins_rejected, 1);
+    server
+        .metric_reaches("logins_rejected", 1, |m| m.logins_rejected)
+        .await;
 
     server.stop().await;
 }
@@ -296,7 +376,7 @@ async fn a_beacon_reaches_a_subscriber_tagged_with_this_servers_q_construct() {
             "user N0CALL-1 pass {N0CALL_PASSCODE} vers test 0.1"
         ))
         .await;
-    settle().await;
+    server.clients_registered(2).await;
 
     sender
         .send("N0CALL-1>APRS,TCPIP*:=6010.20N/02456.40E-Helsinki")
@@ -320,7 +400,7 @@ async fn a_packet_is_not_echoed_back_to_the_client_that_sent_it() {
             "user N0CALL-1 pass {N0CALL_PASSCODE} vers test 0.1 filter b/N0CALL-1"
         ))
         .await;
-    settle().await;
+    server.clients_registered(1).await;
 
     sender.send("N0CALL-1>APRS,TCPIP*:>beacon").await;
 
@@ -347,7 +427,7 @@ async fn a_filter_that_does_not_match_delivers_nothing() {
     sender
         .login(&format!("user N0CALL-1 pass {N0CALL_PASSCODE}"))
         .await;
-    settle().await;
+    server.clients_registered(2).await;
 
     sender.send("N0CALL-1>APRS,TCPIP*:>beacon").await;
 
@@ -371,7 +451,7 @@ async fn a_full_feed_client_receives_everything_without_asking() {
     sender
         .login(&format!("user N0CALL-1 pass {N0CALL_PASSCODE}"))
         .await;
-    settle().await;
+    server.clients_registered(2).await;
 
     sender.send("N0CALL-1>APRS,TCPIP*:>beacon").await;
     assert_eq!(
@@ -397,13 +477,23 @@ async fn an_in_band_filter_command_changes_what_arrives() {
     sender
         .login(&format!("user N0CALL-1 pass {N0CALL_PASSCODE}"))
         .await;
-    settle().await;
+    server.clients_registered(2).await;
 
     sender.send("N0CALL-1>APRS,TCPIP*:>first").await;
     assert!(listener.quiet_for(Duration::from_millis(300)).await);
 
     listener.send("filter b/N0CALL-1").await;
-    settle().await;
+    // The command is acted on silently, so wait for the registry to show the new filter
+    // rather than for anything on the wire.
+    wait_until("the in-band filter command to be applied", || {
+        server
+            .state
+            .registry
+            .snapshot()
+            .iter()
+            .any(|c| c.callsign.as_ref() == "N0CALL-2" && c.filter().to_string() == "b/N0CALL-1")
+    })
+    .await;
 
     sender.send("N0CALL-1>APRS,TCPIP*:>second").await;
     assert_eq!(
@@ -431,7 +521,7 @@ async fn a_port_forced_filter_cannot_be_overridden() {
     sender
         .login(&format!("user N0CALL-1 pass {N0CALL_PASSCODE}"))
         .await;
-    settle().await;
+    server.clients_registered(2).await;
 
     // Dallas is far outside the port's r/60.17/24.94/50 filter.
     sender
@@ -464,7 +554,7 @@ async fn duplicate_transmissions_are_suppressed() {
     sender
         .login(&format!("user N0CALL-1 pass {N0CALL_PASSCODE}"))
         .await;
-    settle().await;
+    server.clients_registered(2).await;
 
     sender.send("N0CALL-1>APRS,TCPIP*:>same text").await;
     assert_eq!(
@@ -500,7 +590,7 @@ async fn an_unverified_client_cannot_inject_packets() {
 
     let mut sender = TestClient::connect(server.addr("Clients")).await;
     sender.login("user N0CALL-1 pass -1").await;
-    settle().await;
+    server.clients_registered(2).await;
 
     sender
         .send("N0CALL-1>APRS,TCPIP*:>should not propagate")
@@ -525,7 +615,7 @@ async fn a_packet_that_already_passed_through_this_server_is_dropped_as_a_loop()
     sender
         .login(&format!("user N0CALL-1 pass {N0CALL_PASSCODE}"))
         .await;
-    settle().await;
+    server.clients_registered(2).await;
 
     sender
         .send("N0CALL-1>APRS,TCPIP*,qAC,T2TEST:>looped back to us")
@@ -554,7 +644,7 @@ async fn an_oversized_line_is_rejected_without_closing_the_connection() {
     sender
         .login(&format!("user N0CALL-1 pass {N0CALL_PASSCODE}"))
         .await;
-    settle().await;
+    server.clients_registered(2).await;
 
     let oversized = format!("N0CALL-1>APRS,TCPIP*:>{}", "x".repeat(600));
     sender.send(&oversized).await;
@@ -578,16 +668,27 @@ async fn malformed_lines_are_counted_and_the_connection_continues() {
     sender
         .login(&format!("user N0CALL-1 pass {N0CALL_PASSCODE}"))
         .await;
-    settle().await;
+    server.clients_registered(1).await;
 
     sender.send("this is not a packet at all").await;
-    settle().await;
-    assert_eq!(server.state.metrics.snapshot().packets_invalid, 1);
+    server
+        .metric_reaches("packets_invalid", 1, |m| m.packets_invalid)
+        .await;
 
-    // A comment line from the client is its keepalive and is not an error.
+    // A comment line from the client is its keepalive, not an error. Nothing happening is
+    // not an event that can be waited for, so a real packet is sent behind it and waited
+    // for instead: submissions from one connection are processed in order, so once the
+    // beacon has been counted the comment has certainly been handled already.
     sender.send("# client keepalive").await;
-    settle().await;
-    assert_eq!(server.state.metrics.snapshot().packets_invalid, 1);
+    sender.send("N0CALL-1>APRS,TCPIP*:>still talking").await;
+    server
+        .metric_reaches("packets_received", 2, |m| m.packets_received)
+        .await;
+    assert_eq!(
+        server.state.metrics.snapshot().packets_invalid,
+        1,
+        "a comment line must not be counted as a malformed packet"
+    );
 
     server.stop().await;
 }
@@ -625,7 +726,7 @@ async fn connections_are_registered_and_released() {
             "user N0CALL-1 pass {N0CALL_PASSCODE} vers aprsr-test 0.1"
         ))
         .await;
-    settle().await;
+    server.clients_registered(1).await;
 
     assert_eq!(server.state.registry.len(), 1);
     let registered = server.state.registry.snapshot();
@@ -637,7 +738,7 @@ async fn connections_are_registered_and_released() {
     assert_eq!(server.state.metrics.snapshot().clients_connected, 1);
 
     drop(client);
-    settle().await;
+    server.clients_registered(0).await;
 
     assert!(server.state.registry.is_empty());
     assert_eq!(server.state.metrics.snapshot().clients_connected, 0);
@@ -659,12 +760,15 @@ async fn positions_are_learned_from_the_traffic_passing_through() {
     sender
         .login(&format!("user N0CALL-1 pass {N0CALL_PASSCODE}"))
         .await;
-    settle().await;
+    server.clients_registered(1).await;
 
     sender
         .send("OH7LZB>APRS,TCPIP*:=6010.20N/02456.40E-Helsinki")
         .await;
-    settle().await;
+    wait_until("the position to be learned", || {
+        server.state.positions.position_of("OH7LZB").is_some()
+    })
+    .await;
 
     let position = server
         .state
@@ -694,7 +798,7 @@ async fn several_clients_are_served_at_once() {
     sender
         .login(&format!("user N0CALL-9 pass {N0CALL_PASSCODE}"))
         .await;
-    settle().await;
+    server.clients_registered(6).await;
 
     sender.send("N0CALL-9>APRS,TCPIP*:>to everyone").await;
 
@@ -719,7 +823,7 @@ async fn shutdown_closes_connected_clients() {
     client
         .login(&format!("user N0CALL pass {N0CALL_PASSCODE}"))
         .await;
-    settle().await;
+    server.clients_registered(1).await;
 
     server.stop().await;
 

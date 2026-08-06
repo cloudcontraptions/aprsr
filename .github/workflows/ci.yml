@@ -16,9 +16,20 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # aprsr is expected to run on Windows, macOS and Linux, so it is built and tested on all
+  # three rather than on Linux with the others assumed. The job name plus the matrix value
+  # produces the check names `Rust (ubuntu-latest)`, `Rust (macos-latest)` and
+  # `Rust (windows-latest)`, which is what branch protection matches on — renaming either
+  # silently detaches the required checks, so treat them as a published interface.
   rust:
     name: Rust
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing must not cancel the others: when something is
+      # platform-specific, the useful information is precisely which platforms disagree.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -27,11 +38,17 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
 
+      # Formatting and lints are platform-independent, so they run once rather than three
+      # times. Everything below this point genuinely differs per platform.
       - name: Formatting
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all --check
 
       - name: Clippy
+        if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Tests
@@ -40,6 +57,9 @@ jobs:
       - name: Release build
         run: cargo build --workspace --release
 
+  # Single-platform on purpose. The frontend build is Node and produces byte-identical
+  # output everywhere, and `.gitattributes` pins LF so the staleness check below compares
+  # like with like. Running it three times would triple the cost to re-verify a tautology.
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
