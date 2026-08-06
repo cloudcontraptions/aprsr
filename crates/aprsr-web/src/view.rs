@@ -163,6 +163,7 @@ mod tests {
                 packets_duplicate: 123_456,
                 packets_invalid: 12,
                 packets_rejected: 34,
+                packets_not_gateable: 5,
                 packets_unverified: 5,
                 packets_dropped_slow: 6,
                 bytes_received: 1_073_741_824,

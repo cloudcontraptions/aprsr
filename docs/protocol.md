@@ -151,6 +151,31 @@ All three from APRS101:
 A decoder returns nothing rather than a partial result: a filter that cannot establish a
 position must not match a range filter by accident.
 
+## Packets that are not relayed
+
+Three classes of packet are refused at ingest, before the q algorithm runs — a packet nobody
+may relay should not be given a construct recording that it entered APRS-IS here.
+
+| Refused | Why |
+|---|---|
+| `NOGATE` or `RFONLY` anywhere in the path | The sending station asked for the packet to stay off the internet |
+| A third-party packet (`}`) whose **inner header** contains `TCPIP` or `TCPXX` | It has already been on APRS-IS; relaying it loops it back wearing different framing, which duplicate detection cannot see through |
+| A general query (`?`) | Per [IGating](http://www.aprs-is.net/IGating.aspx), queries are not gated to or from APRS-IS |
+
+Two details worth stating, because both are easy to get subtly wrong:
+
+- Markers are matched as **whole path elements**. A digipeater called `NOGATEWAY` is an
+  ordinary station, and `TCPIPX` in a third-party header is not `TCPIP`.
+- Only the third-party **header** is examined, never the comment text. A station whose
+  status message mentions TCPIP has made no routing claim, and dropping their traffic for it
+  would be a bug almost impossible to diagnose from outside.
+
+These rules are written in the specification for *IGates* rather than for servers
+([IGating](http://www.aprs-is.net/IGating.aspx),
+[IGate details](http://www.aprs-is.net/IGateDetails.aspx)). aprsr applies them anyway,
+because each describes a packet that should never have reached APRS-IS: if one arrives, an
+IGate upstream has misbehaved, and passing it on spreads the mistake to every other server.
+
 ## Known gaps
 
 Tracked in [`roadmap.md`](roadmap.md). The one worth stating here: **payloads must be valid

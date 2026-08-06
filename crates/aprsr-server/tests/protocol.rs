@@ -627,6 +627,80 @@ async fn a_packet_that_already_passed_through_this_server_is_dropped_as_a_loop()
     server.stop().await;
 }
 
+// --- packets that must not reach APRS-IS -------------------------------------------------
+
+/// A station puts NOGATE or RFONLY in its path to keep a packet off the internet. Honouring
+/// that has to work end to end, not just in the unit tests, because the whole value of the
+/// marker is that a station can rely on it.
+#[tokio::test]
+async fn a_packet_marked_to_stay_off_the_internet_is_not_relayed() {
+    let server = TestServer::start().await;
+
+    let mut listener = TestClient::connect(server.addr("Full feed")).await;
+    listener
+        .login(&format!("user N0CALL-2 pass {N0CALL_PASSCODE}"))
+        .await;
+
+    let mut sender = TestClient::connect(server.addr("Clients")).await;
+    sender
+        .login(&format!("user N0CALL-1 pass {N0CALL_PASSCODE}"))
+        .await;
+    server.clients_registered(2).await;
+
+    sender
+        .send("N0CALL-1>APRS,TCPIP*,NOGATE:>not for the internet")
+        .await;
+    assert!(listener.quiet_for(Duration::from_millis(300)).await);
+
+    // An ordinary packet behind it still arrives, so the connection is unharmed and the
+    // rejection was about the packet rather than the client.
+    sender.send("N0CALL-1>APRS,TCPIP*:>ordinary").await;
+    assert_eq!(
+        listener.packet().await,
+        "N0CALL-1>APRS,TCPIP*,qAC,T2TEST:>ordinary"
+    );
+
+    server
+        .metric_reaches("packets_not_gateable", 1, |m| m.packets_not_gateable)
+        .await;
+
+    server.stop().await;
+}
+
+/// A third-party packet that has already been on APRS-IS would loop back onto the network
+/// wearing different framing, which duplicate detection cannot see through.
+#[tokio::test]
+async fn a_third_party_packet_that_has_already_been_on_aprs_is_is_not_relayed() {
+    let server = TestServer::start().await;
+
+    let mut listener = TestClient::connect(server.addr("Full feed")).await;
+    listener
+        .login(&format!("user N0CALL-2 pass {N0CALL_PASSCODE}"))
+        .await;
+
+    let mut sender = TestClient::connect(server.addr("Clients")).await;
+    sender
+        .login(&format!("user N0CALL-1 pass {N0CALL_PASSCODE}"))
+        .await;
+    server.clients_registered(2).await;
+
+    sender
+        .send("N0CALL-1>APRS,TCPIP*:}OH2RCH>APRS,TCPIP*:>round it goes")
+        .await;
+    assert!(listener.quiet_for(Duration::from_millis(300)).await);
+
+    // One that has not been on APRS-IS is ordinary traffic and is relayed.
+    sender
+        .send("N0CALL-1>APRS,TCPIP*:}OH2RCH>APRS,WIDE1-1:>from RF")
+        .await;
+    assert_eq!(
+        listener.packet().await,
+        "N0CALL-1>APRS,TCPIP*,qAC,T2TEST:}OH2RCH>APRS,WIDE1-1:>from RF"
+    );
+
+    server.stop().await;
+}
+
 // --- robustness ------------------------------------------------------------------------
 
 /// A line over the 512-byte limit is refused, but the connection survives — one oversized

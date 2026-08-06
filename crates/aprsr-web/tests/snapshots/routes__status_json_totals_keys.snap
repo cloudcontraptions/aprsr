@@ -11,6 +11,7 @@ expression: totals
     "packets_dropped_slow",
     "packets_duplicate",
     "packets_invalid",
+    "packets_not_gateable",
     "packets_received",
     "packets_rejected",
     "packets_sent",

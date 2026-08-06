@@ -27,6 +27,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whitespace before the filter sees it. It takes the rest of the line, and an expression that
   puts another filter after it is now an error rather than silently folding that filter into
   an object name.
+- **Packets that must not reach APRS-IS are now refused at ingest**: a path carrying
+  `NOGATE` or `RFONLY`, a third-party packet whose inner header shows it has already been on
+  APRS-IS, and general queries. The check runs before the q algorithm, so a packet nobody may
+  relay is not given a construct claiming it entered here. Markers are matched as whole path
+  elements, and only the third-party header is examined — the word `TCPIP` in someone's
+  comment text is not a routing claim.
 - **The server-to-server half of the q algorithm** (`qconstruct::apply_server`), which is
   what a packet arriving over an uplink or peer link needs. A packet with no construct gets
   `qAS` and the sending server's login; one that already has a construct keeps it, because

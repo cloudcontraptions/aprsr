@@ -19,6 +19,7 @@
 use std::sync::Arc;
 
 use aprsr_core::dupecheck::DupeCheck;
+use aprsr_core::gating::{self, GateReject};
 use aprsr_core::packet::{PacketError, Tnc2Packet};
 use aprsr_core::qconstruct::{self, QCode, QContext, QReject};
 use aprsr_core::{aprs, filter::PositionSource};
@@ -54,6 +55,8 @@ pub enum Disposition {
     Duplicate,
     /// The q algorithm refused it.
     Rejected(QReject),
+    /// The packet's own content says it may not go onto APRS-IS.
+    NotGateable(GateReject),
 }
 
 impl Disposition {
@@ -88,6 +91,14 @@ pub fn process(
             return Disposition::Invalid(error);
         }
     };
+
+    // Before the q algorithm, deliberately. A packet nobody may relay should not be given
+    // a construct recording that it entered APRS-IS here — that record would outlive the
+    // rejection and misattribute the packet to this server if it ever leaked.
+    if let Err(reject) = gating::check(&packet) {
+        Metrics::incr(&state.metrics.packets_not_gateable);
+        return Disposition::NotGateable(reject);
+    }
 
     if dupecheck.check(&packet, now) {
         Metrics::incr(&state.metrics.packets_duplicate);

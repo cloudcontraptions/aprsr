@@ -17,6 +17,8 @@ Update this file in the same change that moves an item.
 - **Filters** — `r/ p/ b/ o/ os/ t/ s/ d/ a/ e/ g/ u/ q/ m/ f/`, additive with `-` negation,
   bounded against hostile input.
 - **Duplicate detection** — rolling window keyed on the transmission rather than the path.
+- **Gating rules** — packets marked `NOGATE`/`RFONLY`, third-party packets that have already
+  been on APRS-IS, and general queries are refused at ingest.
 - **Ports** — `fullfeed` and `igate`, per-port forced filters, per-port client caps,
   `hidden`.
 - **Dispatch** — single ingest task, bounded per-client queues, slow clients drop packets

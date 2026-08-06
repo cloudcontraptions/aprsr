@@ -22,6 +22,7 @@ pub mod aprs;
 pub mod callsign;
 pub mod dupecheck;
 pub mod filter;
+pub mod gating;
 pub mod geo;
 pub mod login;
 pub mod packet;
