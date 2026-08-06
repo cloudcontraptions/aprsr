@@ -26,6 +26,8 @@ Update this file in the same change that moves an item.
 - **Persistence** — SQLite via SeaORM: station positions (loaded at start, saved every
   minute and at shutdown), connection log, sampled counters with pruning.
 - **Web** — server-rendered dashboard kept live with HTMX, `status.json`, `/healthz`.
+- **Observability** — server-sent event streams for status and for the live packet feed,
+  `/metrics` in Prometheus text format, and `/api/history` over the sampled counters.
 - **Operations** — `run`, `check-config`, `convert-config`, `passcode`; graceful shutdown on
   SIGINT/SIGTERM and on the Windows console-control events a service host actually sends;
   text or JSON logs.
@@ -62,8 +64,6 @@ recognised, but nothing consults them yet.
 
 - **`dupefeed` ports** — the port kind is configurable and clients on it currently receive
   nothing. Delivering the packets duplicate detection dropped needs a second fan-out path.
-- **Counter graphs** — samples are already collected and pruned; the dashboard shows only
-  live totals.
 - **Server-to-server messaging** — APRS messages addressed to the server itself
   (aprsc's `messaging.c`).
 - **`t/n` NWS matching** — a heuristic over callsign prefixes; see `protocol.md`.

@@ -27,6 +27,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whitespace before the filter sees it. It takes the rest of the line, and an expression that
   puts another filter after it is now an error rather than silently folding that filter into
   an object name.
+- **Live streams, metrics and counter history.** `GET /events/status` pushes a snapshot a
+  second over server-sent events instead of the dashboard polling three fragments;
+  `GET /events/packets` carries the relayed feed itself. `GET /metrics` exposes the counters
+  in Prometheus text format, which aprsc has no equivalent for. `GET /api/history` reads the
+  `counter_sample` rows — written every minute since the first release and, until now, never
+  read by anything. `GET /config.json` carries the settings the browser needs, so the map
+  tile server can be changed without rebuilding the committed assets.
+
+  One snapshot is captured per tick however many browsers are watching, and the packet feed
+  publishes only when somebody is subscribed — a relaxed atomic load on the dispatch path
+  and nothing else when nobody is.
+
+  The packet feed is a full APRS-IS stream over HTTP with no passcode, so it is off unless
+  `http.packet_stream` is set *and* the caller presents the administrative token.
 - **`t/c` (CWOP) in the type filter.** Not in the specification's `poimqstunw` letter set,
   but aprsc accepts it, so rejecting it made a filter string that works against the reference
   server an error here. Recognition is a heuristic over the `CW`/`DW`/`EW` callsign series,

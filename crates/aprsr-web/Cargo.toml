@@ -17,6 +17,7 @@ aprsr-core.workspace = true
 aprsr-server.workspace = true
 askama.workspace = true
 askama_web.workspace = true
+futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -25,6 +26,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+proptest.workspace = true
 rstest.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

@@ -10,11 +10,14 @@
 // reachable — through the generated struct.
 #![allow(unreachable_pub)]
 
+use std::time::Duration;
+
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use aprsr_server::ServerState;
 use askama::Template;
 use askama_web::WebTemplate;
 
+use crate::sse;
 use crate::status::Status;
 use crate::view::{ClientRow, ListenerRow, Summary};
 
@@ -228,4 +231,245 @@ pub async fn admin_reload(request: HttpRequest, state: web::Data<ServerState>) -
                 .body(format!("{error}\n"))
         }
     }
+}
+
+// --- live streams -------------------------------------------------------------------------
+
+/// How often the status stream emits a snapshot.
+const STATUS_EVENT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How long a stream may go silent before a heartbeat is sent.
+///
+/// Proxies reap idle connections, and the packet stream on a quiet server is idle by
+/// nature. Comfortably under the 60 seconds most defaults use.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+
+/// How long a client should wait before reconnecting a dropped stream.
+const RECONNECT_DELAY: Duration = Duration::from_secs(3);
+
+/// `GET /events/status` — a status snapshot every second, as server-sent events.
+///
+/// One snapshot is captured per tick regardless of how many browsers are watching, so the
+/// cost of the dashboard does not grow with its audience.
+#[get("/events/status")]
+pub async fn events_status(state: web::Data<ServerState>) -> impl Responder {
+    let stream = futures_util::stream::unfold((state, true), |(state, first)| async move {
+        if !first {
+            tokio::time::sleep(STATUS_EVENT_INTERVAL).await;
+        }
+
+        let status = Status::capture(&state);
+        // A status snapshot that cannot be serialised is a bug in this crate; sending a
+        // heartbeat keeps the stream alive so the rest of the dashboard still updates.
+        let frame = serde_json::to_string(&status).map_or_else(
+            |error| {
+                tracing::error!(%error, "could not serialise a status snapshot");
+                sse::heartbeat()
+            },
+            |json| {
+                sse::Event::named("status", &json)
+                    .with_retry(RECONNECT_DELAY)
+                    .encode()
+            },
+        );
+
+        Some((
+            Ok::<_, std::convert::Infallible>(web::Bytes::from(frame)),
+            (state, false),
+        ))
+    });
+
+    HttpResponse::Ok()
+        .content_type(sse::CONTENT_TYPE)
+        // Without this a reverse proxy will happily buffer the whole stream and deliver
+        // nothing until it closes, which looks exactly like a broken server.
+        .insert_header(("x-accel-buffering", "no"))
+        .insert_header(("cache-control", "no-store"))
+        .streaming(stream)
+}
+
+/// `GET /events/packets` — every packet the server relays, as it relays it.
+///
+/// This is a full APRS-IS feed over HTTP with no passcode and no filter, which is why it is
+/// off unless `http.packet_stream` is set *and* the caller presents the administrative
+/// token. A status page that quietly became an unauthenticated data source would be a
+/// surprise of the worst kind.
+#[get("/events/packets")]
+pub async fn events_packets(request: HttpRequest, state: web::Data<ServerState>) -> impl Responder {
+    if !state.config().http.packet_stream {
+        return HttpResponse::NotFound()
+            .content_type("text/plain; charset=utf-8")
+            .body("the packet stream is not enabled on this server\n");
+    }
+    if !is_authorised(&request, &state) {
+        return HttpResponse::Unauthorized()
+            .content_type("text/plain; charset=utf-8")
+            .body("an administrative token is required\n");
+    }
+
+    let receiver = state.subscribe_packets();
+    let stream = futures_util::stream::unfold(receiver, |mut receiver| async move {
+        let frame = match tokio::time::timeout(HEARTBEAT_INTERVAL, receiver.recv()).await {
+            // A packet.
+            Ok(Ok(line)) => sse::Event::named("packet", &line).encode(),
+            // This viewer could not keep up. Say so rather than pretending the gap did not
+            // happen: a feed with silent holes is worse than one that admits them.
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(missed))) => {
+                sse::Event::named("lagged", &missed.to_string()).encode()
+            }
+            // The server is shutting down.
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return None,
+            // Nothing for a while; keep the connection off the proxy's reaper list.
+            Err(_) => sse::heartbeat(),
+        };
+        Some((
+            Ok::<_, std::convert::Infallible>(web::Bytes::from(frame)),
+            receiver,
+        ))
+    });
+
+    HttpResponse::Ok()
+        .content_type(sse::CONTENT_TYPE)
+        .insert_header(("x-accel-buffering", "no"))
+        .insert_header(("cache-control", "no-store"))
+        .streaming(stream)
+}
+
+// --- machine-readable observability -------------------------------------------------------
+
+/// `GET /metrics` — the counters in Prometheus text format.
+///
+/// Unauthenticated, like `status.json`, and exposing the same information: totals with no
+/// per-client detail. An operator who needs the status port closed should firewall it
+/// rather than rely on this endpoint being obscure.
+#[get("/metrics")]
+pub async fn metrics(state: web::Data<ServerState>) -> impl Responder {
+    let body = crate::metrics_text::render(
+        &state.metrics.snapshot(),
+        state.uptime_secs(),
+        state.positions.len(),
+    );
+    HttpResponse::Ok()
+        .content_type(crate::metrics_text::CONTENT_TYPE)
+        .insert_header(("cache-control", "no-store"))
+        .body(body)
+}
+
+/// Query for [`api_history`].
+#[derive(Debug, serde::Deserialize)]
+pub struct HistoryQuery {
+    /// Which series to return.
+    counter: String,
+    /// How far back to look, in seconds. Defaults to a day.
+    #[serde(default)]
+    since_secs: Option<u64>,
+}
+
+/// One sample in a series.
+#[derive(Debug, serde::Serialize)]
+struct HistoryPoint {
+    at: i64,
+    value: i64,
+}
+
+/// A time series, with enough context for a client to chart it correctly.
+#[derive(Debug, serde::Serialize)]
+struct HistoryResponse {
+    counter: String,
+    /// `counter` for a running total, `gauge` for a level.
+    ///
+    /// This is the field that stops a chart being quietly wrong. Three of the sampled
+    /// series are cumulative and one — `clients_connected` — is a level; differencing a
+    /// level produces nonsense, and there is no way to tell from the numbers alone.
+    kind: &'static str,
+    /// Nominal seconds between samples, so a client can tell a gap from a flat line.
+    interval_secs: u64,
+    points: Vec<HistoryPoint>,
+}
+
+/// Sampling cadence of `commands::maintain`, which writes these rows.
+const SAMPLE_INTERVAL_SECS: u64 = 60;
+
+/// Default window when the caller does not ask for one.
+const DEFAULT_HISTORY_SECS: u64 = 24 * 60 * 60;
+
+/// Which of the sampled series are levels rather than running totals.
+fn series_kind(counter: &str) -> &'static str {
+    match counter {
+        "clients_connected" => "gauge",
+        _ => "counter",
+    }
+}
+
+/// `GET /api/history?counter=packets_received&since_secs=3600` — a sampled series.
+///
+/// This is the first reader `counter_sample` has ever had: the rows have been written every
+/// minute since the first release and nothing consumed them, so the dashboard could only
+/// ever show live totals.
+#[get("/api/history")]
+pub async fn api_history(
+    state: web::Data<ServerState>,
+    query: web::Query<HistoryQuery>,
+) -> impl Responder {
+    let Some(store) = state.store.as_ref() else {
+        // A server running against `sqlite::memory:` with no store keeps no history. Say
+        // so rather than returning an empty series, which reads as "nothing happened".
+        return HttpResponse::ServiceUnavailable()
+            .content_type("text/plain; charset=utf-8")
+            .body("this server keeps no counter history\n");
+    };
+
+    let window = query.since_secs.unwrap_or(DEFAULT_HISTORY_SECS);
+    let since = i64::try_from(aprsr_server::now_secs().saturating_sub(window)).unwrap_or(0);
+
+    match store.counter_history(&query.counter, since).await {
+        Ok(rows) => HttpResponse::Ok()
+            .insert_header(("cache-control", "no-store"))
+            .json(HistoryResponse {
+                kind: series_kind(&query.counter),
+                counter: query.counter.clone(),
+                interval_secs: SAMPLE_INTERVAL_SECS,
+                points: rows
+                    .into_iter()
+                    .map(|row| HistoryPoint {
+                        at: row.sampled_at,
+                        value: row.value,
+                    })
+                    .collect(),
+            }),
+        Err(error) => {
+            tracing::warn!(%error, counter = %query.counter, "could not read counter history");
+            HttpResponse::InternalServerError()
+                .content_type("text/plain; charset=utf-8")
+                .body("could not read the counter history\n")
+        }
+    }
+}
+
+/// Settings the browser needs, which must not be compiled into the bundle.
+#[derive(Debug, serde::Serialize)]
+struct ClientConfig {
+    server_id: String,
+    /// Empty when the operator wants no tile server contacted at all.
+    map_tile_url: String,
+    map_tile_attribution: String,
+    /// Whether `/events/packets` is worth offering in the interface.
+    packet_stream: bool,
+}
+
+/// `GET /config.json` — what the dashboard needs to know about this server.
+///
+/// The map tile URL lives here rather than in the JavaScript bundle because a closed
+/// network has to be able to change it without rebuilding the assets — and because the
+/// committed bundle is byte-compared in CI, so baking a per-deployment value into it would
+/// make every deployment look like a stale build.
+#[get("/config.json")]
+pub async fn config_json(state: web::Data<ServerState>) -> impl Responder {
+    let config = state.config();
+    HttpResponse::Ok().json(ClientConfig {
+        server_id: state.server_id.to_string(),
+        map_tile_url: config.http.map_tile_url.clone(),
+        map_tile_attribution: config.http.map_tile_attribution.clone(),
+        packet_stream: config.http.packet_stream,
+    })
 }

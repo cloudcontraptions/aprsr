@@ -156,6 +156,10 @@ pub fn process(
         &state.metrics,
     );
 
+    // Offer it to anything watching the live feed. Costs one relaxed atomic load when
+    // nobody is, which is almost always.
+    state.publish_packet(&rendered);
+
     Disposition::Delivered {
         line: rendered,
         code: outcome.code,

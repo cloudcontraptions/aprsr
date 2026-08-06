@@ -140,7 +140,13 @@ pub struct Database {
 }
 
 /// HTTP listeners.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+///
+/// `Default` is written out rather than derived. `Config.http` is `#[serde(default)]`, so a
+/// file with no `[http]` table at all is built by `Http::default()` — which does not run the
+/// per-field `#[serde(default = ...)]` functions. A derived `Default` would therefore give a
+/// server with no `[http]` section an empty map tile URL while one with an empty `[http]`
+/// section got the real default, and nothing would point at why.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Http {
     /// Address for the status dashboard and JSON API.
@@ -156,6 +162,76 @@ pub struct Http {
     /// than writing it into the file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin_token: Option<String>,
+    /// Serve the live packet feed at `/events/packets`.
+    ///
+    /// Off by default, and requires `admin_token` even when on. The feed is a full APRS-IS
+    /// stream over HTTP with no passcode and no filter, so enabling it makes the status
+    /// port a data source rather than only a status page — a deliberate act, not a default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub packet_stream: bool,
+    /// A file whose contents are shown as a banner on the dashboard.
+    ///
+    /// The contents are inserted as **raw HTML**, so the operator can style a notice the
+    /// way aprsc's `motd.html` allows. This is trusted input at the same level as this
+    /// configuration file: anybody who can write it can already run code as the server
+    /// user, so it grants no new authority — but it should not be group-writable.
+    ///
+    /// A missing file is not an error; it simply means no banner, so a notice can be added
+    /// and removed by creating and deleting the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motd_file: Option<PathBuf>,
+    /// Tile server for the dashboard's station map.
+    ///
+    /// Sent to the browser rather than compiled into the bundle, so a closed network can
+    /// point it at its own tiles. Set it to an empty string to draw stations on a plain
+    /// background and contact no tile server at all.
+    #[serde(
+        default = "default_map_tile_url",
+        skip_serializing_if = "is_default_map_tile_url"
+    )]
+    pub map_tile_url: String,
+    /// Attribution shown on the map, which most tile servers require.
+    #[serde(
+        default = "default_map_tile_attribution",
+        skip_serializing_if = "is_default_map_tile_attribution"
+    )]
+    pub map_tile_attribution: String,
+}
+
+impl Default for Http {
+    fn default() -> Self {
+        Self {
+            status_bind: None,
+            admin_token: None,
+            packet_stream: false,
+            motd_file: None,
+            map_tile_url: default_map_tile_url(),
+            map_tile_attribution: default_map_tile_attribution(),
+        }
+    }
+}
+
+/// OpenStreetMap's public tiles, which work out of the box.
+///
+/// Heavy use is against their tile usage policy, so an operator running a busy dashboard
+/// should point this at their own server — which is the reason it is configurable.
+fn default_map_tile_url() -> String {
+    "https://tile.openstreetmap.org/{z}/{x}/{y}.png".to_owned()
+}
+
+fn default_map_tile_attribution() -> String {
+    "© OpenStreetMap contributors".to_owned()
+}
+
+// A value left at its default is not something the operator chose, so it is left out when
+// a configuration is written back — by `convert-config`, or by any round trip. A generated
+// file should show what was asked for, not every setting that exists.
+fn is_default_map_tile_url(value: &str) -> bool {
+    value == default_map_tile_url()
+}
+
+fn is_default_map_tile_attribution(value: &str) -> bool {
+    value == default_map_tile_attribution()
 }
 
 impl Http {

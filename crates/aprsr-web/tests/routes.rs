@@ -478,3 +478,71 @@ async fn reloading_a_server_with_no_configuration_file_is_refused() {
     let response = post_reload(state, Some("s3cret-token")).await;
     assert_eq!(response.status(), StatusCode::CONFLICT);
 }
+
+// --- observability endpoints --------------------------------------------------------------
+
+#[actix_web::test]
+async fn metrics_are_exported_in_prometheus_format() {
+    let body = body_of(state(), "/metrics").await;
+    assert!(body.contains("# TYPE aprsr_packets_received_total counter"));
+    assert!(body.contains("# TYPE aprsr_clients_connected gauge"));
+    assert!(body.contains("\naprsr_uptime_seconds "));
+}
+
+#[actix_web::test]
+async fn metrics_are_served_as_prometheus_text() {
+    let response = get!(state(), "/metrics");
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(content_type.starts_with("text/plain"), "got {content_type}");
+    assert!(content_type.contains("version=0.0.4"), "got {content_type}");
+}
+
+/// The map tile URL has to reach the browser from the server, not from the bundle: a closed
+/// network must be able to change it without rebuilding assets that CI byte-compares.
+#[actix_web::test]
+async fn config_json_carries_the_map_settings() {
+    let body = body_of(state(), "/config.json").await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("config.json");
+    assert_eq!(json["server_id"], "T2TEST");
+    assert!(
+        json["map_tile_url"]
+            .as_str()
+            .is_some_and(|u| u.contains("{z}")),
+        "the tile template reaches the client"
+    );
+    assert_eq!(json["packet_stream"], false, "off unless enabled");
+}
+
+/// A server with no database keeps no history, and should say so rather than return an
+/// empty series — which a chart would draw as "nothing ever happened".
+#[actix_web::test]
+async fn history_says_so_when_the_server_keeps_none() {
+    let response = get!(state(), "/api/history?counter=packets_received");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// The packet feed is a full APRS-IS stream over HTTP. It must be off unless deliberately
+/// enabled, and must still demand the token even then.
+#[actix_web::test]
+async fn the_packet_stream_is_off_by_default() {
+    let response = get!(state(), "/events/packets");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[actix_web::test]
+async fn the_packet_stream_still_needs_the_token_when_enabled() {
+    let config = format!("{CONFIG}\n[http]\nadmin_token = \"s3cret\"\npacket_stream = true\n");
+    let loaded = Config::from_toml(&config).expect("valid test configuration");
+    let state = Arc::new(ServerState::new(Arc::new(loaded), None));
+
+    let app = test::init_service(App::new().configure(aprsr_web::configure(state))).await;
+    let request = test::TestRequest::get().uri("/events/packets").to_request();
+    let response = test::call_service(&app, request).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}

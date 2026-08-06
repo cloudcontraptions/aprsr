@@ -123,7 +123,19 @@ pub struct ServerState {
     pub store: Option<Store>,
     /// Unix seconds when the server started.
     pub started_at: u64,
+    /// Live packet feed for anything watching over HTTP.
+    ///
+    /// Published to from the dispatch path, which is the hottest code in the server, so
+    /// nothing is sent — and nothing is even formatted — unless somebody is subscribed. See
+    /// [`ServerState::publish_packet`].
+    packet_events: tokio::sync::broadcast::Sender<Arc<str>>,
 }
+
+/// How many packets a slow subscriber may fall behind before it starts missing them.
+///
+/// A viewer that cannot keep up with a full feed should lose packets rather than apply
+/// back-pressure to the server: the dashboard is a convenience and the network is not.
+const PACKET_EVENT_BACKLOG: usize = 256;
 
 impl ServerState {
     /// Build state for a configuration, with an optional database behind it.
@@ -138,7 +150,30 @@ impl ServerState {
             positions: Arc::new(PositionCache::new()),
             store,
             started_at: now_secs(),
+            packet_events: tokio::sync::broadcast::Sender::new(PACKET_EVENT_BACKLOG),
         }
+    }
+
+    /// Subscribe to the live packet feed.
+    #[must_use]
+    pub fn subscribe_packets(&self) -> tokio::sync::broadcast::Receiver<Arc<str>> {
+        self.packet_events.subscribe()
+    }
+
+    /// Offer a relayed packet to anything watching the live feed.
+    ///
+    /// Returns immediately when nobody is subscribed, which is the overwhelmingly common
+    /// case. `receiver_count` is a relaxed atomic load, so an unwatched server pays one
+    /// load per packet and nothing else — no clone, no send, no allocation. `AGENTS.md` §4
+    /// asks specifically that the dispatch path not format strings it might not send, and
+    /// this is that rule applied to the feed.
+    pub fn publish_packet(&self, line: &Arc<str>) {
+        if self.packet_events.receiver_count() == 0 {
+            return;
+        }
+        // An error here means every subscriber vanished between the check and the send,
+        // which is not a problem worth reporting.
+        let _ = self.packet_events.send(Arc::clone(line));
     }
 
     /// Record where the configuration came from, enabling reload.

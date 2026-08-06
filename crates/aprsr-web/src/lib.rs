@@ -12,7 +12,9 @@
 //! [Askama]: https://askama.rs/
 
 pub mod format;
+pub mod metrics_text;
 pub mod routes;
+pub mod sse;
 pub mod status;
 pub mod view;
 
@@ -58,7 +60,12 @@ pub fn configure(state: Arc<ServerState>) -> impl Fn(&mut web::ServiceConfig) + 
             .service(routes::fragment_summary)
             .service(routes::fragment_listeners)
             .service(routes::fragment_clients)
-            .service(routes::admin_reload);
+            .service(routes::admin_reload)
+            .service(routes::events_status)
+            .service(routes::events_packets)
+            .service(routes::metrics)
+            .service(routes::api_history)
+            .service(routes::config_json);
     }
 }
 

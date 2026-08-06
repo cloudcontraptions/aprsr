@@ -96,10 +96,29 @@ fn the_admin_token_is_closed_by_default_and_matched_exactly(
     #[case] expected: bool,
 ) {
     let http = Http {
-        status_bind: None,
         admin_token: configured.map(ToOwned::to_owned),
+        ..Http::default()
     };
     assert_eq!(http.admin_token_matches(presented), expected);
+}
+
+/// A missing `[http]` table and an empty one must produce the same configuration.
+///
+/// They very nearly did not. `Config.http` is `#[serde(default)]`, so a file with no
+/// `[http]` section is built by `Http::default()` — which does not run the per-field
+/// `#[serde(default = ...)]` functions. With a derived `Default` the map tile URL was empty
+/// in the first case and correct in the second, and nothing in either file hinted at why.
+#[test]
+fn a_missing_http_section_and_an_empty_one_agree() {
+    let without = Config::from_toml(MINIMAL).expect("valid");
+    let with_empty = Config::from_toml(&format!("{MINIMAL}\n[http]\n")).expect("valid");
+
+    assert_eq!(without.http, with_empty.http);
+    assert!(
+        !without.http.map_tile_url.is_empty(),
+        "the shipped default reaches a server with no [http] section"
+    );
+    assert_eq!(without.http, Http::default());
 }
 
 #[test]
