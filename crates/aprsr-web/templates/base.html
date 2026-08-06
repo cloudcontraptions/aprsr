@@ -27,6 +27,15 @@
       </div>
     </header>
 
+    {#- The operator's own notice, inserted verbatim. It is trusted at the same level as
+        the configuration file: whoever can write it can already run code as this process.
+        See `http.motd_file`. -#}
+    {% if let Some(motd) = motd %}
+    <aside class="border-b border-amber-500/30 bg-amber-500/10">
+      <div class="mx-auto max-w-6xl px-6 py-3 text-sm text-amber-100">{{ motd|safe }}</div>
+    </aside>
+    {% endif %}
+
     <main class="mx-auto max-w-6xl px-6 py-8">{% block content %}{% endblock %}</main>
 
     <footer class="mx-auto max-w-6xl px-6 pb-10 text-xs leading-relaxed text-slate-500">

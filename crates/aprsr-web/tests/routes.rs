@@ -546,3 +546,91 @@ async fn the_packet_stream_still_needs_the_token_when_enabled() {
     let response = test::call_service(&app, request).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+// --- message of the day -------------------------------------------------------------------
+
+#[actix_web::test]
+async fn no_motd_file_means_no_banner() {
+    let body = body_of(state(), "/").await;
+    assert!(
+        !body.contains("<aside"),
+        "no banner when none is configured"
+    );
+}
+
+/// The operator's own HTML, inserted verbatim. This is trusted at the same level as the
+/// configuration file — anybody who can write it can already run code as the server user —
+/// and rendering it as text would lose the formatting the feature exists for.
+#[actix_web::test]
+async fn a_motd_file_is_rendered_as_html() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let motd = dir.path().join("motd.html");
+    std::fs::write(&motd, "<strong>Maintenance</strong> at 0200Z").expect("writes the motd");
+
+    let config = format!(
+        "{CONFIG}\n[http]\nmotd_file = {:?}\n",
+        motd.to_string_lossy()
+    );
+    let loaded = Config::from_toml(&config).expect("valid test configuration");
+    let state = Arc::new(ServerState::new(Arc::new(loaded), None));
+
+    let body = body_of(state, "/").await;
+    assert!(
+        body.contains("<strong>Maintenance</strong> at 0200Z"),
+        "the operator's markup reaches the page unescaped"
+    );
+}
+
+/// Creating and deleting the file is how a notice goes up and comes down, so an empty or
+/// missing file must mean no banner rather than an empty one.
+#[actix_web::test]
+async fn an_empty_or_missing_motd_file_shows_nothing() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let motd = dir.path().join("motd.html");
+    std::fs::write(&motd, "   \n").expect("writes an empty motd");
+
+    let config = format!(
+        "{CONFIG}\n[http]\nmotd_file = {:?}\n",
+        motd.to_string_lossy()
+    );
+    let loaded = Config::from_toml(&config).expect("valid test configuration");
+    let state = Arc::new(ServerState::new(Arc::new(loaded), None));
+    assert!(!body_of(Arc::clone(&state), "/").await.contains("<aside"));
+
+    // And a file that goes away takes the banner with it, without a restart.
+    std::fs::remove_file(&motd).expect("removes the motd");
+    assert!(!body_of(state, "/").await.contains("<aside"));
+}
+
+// --- alarms -------------------------------------------------------------------------------
+
+/// A healthy server reports an empty list rather than omitting the field, so a consumer can
+/// read `alarms.length === 0` without first checking the field exists.
+#[actix_web::test]
+async fn a_healthy_server_reports_no_alarms() {
+    let body = body_of(state(), "/status.json").await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("status.json");
+    assert_eq!(json["alarms"].as_array().map(Vec::len), Some(0));
+}
+
+/// An operator who configured an uplink expects to be exchanging traffic. Until uplinks are
+/// implemented they are not, and the status page is where they will look when the server
+/// seems to see nothing.
+#[actix_web::test]
+async fn configured_but_unconnected_uplinks_raise_an_alarm() {
+    let config = format!(
+        "{CONFIG}\n[[uplink]]\nname = \"Core rotate\"\nkind = \"full\"\naddress = \"rotate.aprs.net:10152\"\n"
+    );
+    let loaded = Config::from_toml(&config).expect("valid test configuration");
+    let state = Arc::new(ServerState::new(Arc::new(loaded), None));
+
+    let body = body_of(state, "/status.json").await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("status.json");
+    assert_eq!(json["alarms"][0]["name"], "no_uplink");
+    assert!(
+        json["alarms"][0]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("not implemented")),
+        "the message says why, not just that something is wrong"
+    );
+}

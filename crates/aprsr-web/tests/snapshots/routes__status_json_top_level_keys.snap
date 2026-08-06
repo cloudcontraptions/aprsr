@@ -3,6 +3,7 @@ source: crates/aprsr-web/tests/routes.rs
 expression: top
 ---
 [
+    "alarms",
     "clients",
     "listeners",
     "server",

@@ -207,6 +207,7 @@ mod tests {
                 bytes_sent: 1_048_576,
             }],
             stations_tracked: 8_192,
+            alarms: Vec::new(),
         }
     }
 

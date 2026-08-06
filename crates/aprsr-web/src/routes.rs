@@ -35,6 +35,8 @@ struct DashboardTemplate {
     title: String,
     server_id: String,
     version: &'static str,
+    /// The operator's notice, inserted as raw HTML. See `http.motd_file`.
+    motd: Option<String>,
     /// Pre-rendered fragments, so the first paint is complete and the HTMX polls reuse
     /// exactly the same markup.
     summary_html: String,
@@ -87,6 +89,7 @@ pub async fn dashboard(state: web::Data<ServerState>) -> impl Responder {
         title: status.server.id.clone(),
         server_id: status.server.id,
         version: aprsr_server::VERSION,
+        motd: read_motd(&state),
         summary_html,
         listeners_html,
         clients_html,
@@ -133,6 +136,26 @@ pub async fn fragment_clients(state: web::Data<ServerState>) -> impl Responder {
     let status = Status::capture(&state);
     ClientsTemplate {
         clients: ClientRow::from_status(&status),
+    }
+}
+
+/// Read the operator's message of the day, if there is one.
+///
+/// Read per request rather than cached at startup, so a notice can be put up and taken down
+/// by creating and deleting the file — which is how aprsc's `motd.html` behaves and is the
+/// property that makes it useful during an incident.
+///
+/// A missing file is the normal case and is not an error. An unreadable one is logged at
+/// debug level and treated as absent: a broken banner must not take the dashboard with it.
+fn read_motd(state: &ServerState) -> Option<String> {
+    let path = state.config().http.motd_file.clone()?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) if text.trim().is_empty() => None,
+        Ok(text) => Some(text),
+        Err(error) => {
+            tracing::debug!(%error, path = %path.display(), "no message of the day");
+            None
+        }
     }
 }
 

@@ -21,6 +21,52 @@ pub struct Status {
     pub clients: Vec<ClientInfo>,
     /// Stations whose position the server currently knows.
     pub stations_tracked: usize,
+    /// Conditions an operator should know about, empty when there are none.
+    ///
+    /// Always present rather than omitted when empty: a consumer should be able to read
+    /// `alarms.length === 0` as "healthy" without first having to check the field exists.
+    pub alarms: Vec<Alarm>,
+}
+
+/// Something wrong that an operator should see.
+///
+/// Deliberately a small, closed set evaluated from current state rather than a general
+/// event log. An alarm that cannot clear itself is worse than no alarm: it trains the
+/// operator to ignore the panel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Alarm {
+    /// Stable identifier, for anything matching on it.
+    pub name: &'static str,
+    /// What is wrong, in a sentence an operator can act on.
+    pub message: String,
+}
+
+/// Evaluate the alarm conditions against current state.
+///
+/// Each one must be derivable from what is true *now*, so it clears by itself when the
+/// condition goes away. That rules out anything based on a cumulative counter — the count
+/// of packets dropped for slow clients never goes down, so an alarm on it would latch on
+/// at the first blip and stay lit forever.
+fn alarms(config: &aprsr_config::Config) -> Vec<Alarm> {
+    let mut alarms = Vec::new();
+
+    // An operator who configured an uplink expects to be part of the network. Until uplinks
+    // are implemented that expectation is wrong, and the status page is where they will
+    // look when their server appears to see no traffic. `check-config` says the same thing
+    // at startup, but nobody re-reads startup output a week later.
+    if !config.uplinks.is_empty() {
+        alarms.push(Alarm {
+            name: "no_uplink",
+            message: format!(
+                "{} uplink(s) are configured but none is connected: outbound uplinks are \
+                 not implemented in this release, so this server is not exchanging traffic \
+                 with the rest of APRS-IS.",
+                config.uplinks.len()
+            ),
+        });
+    }
+
+    alarms
 }
 
 /// Identity and uptime.
@@ -120,6 +166,7 @@ impl Status {
             listeners,
             clients,
             stations_tracked: state.positions.len(),
+            alarms: alarms(&config),
         }
     }
 

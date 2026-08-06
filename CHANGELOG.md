@@ -41,6 +41,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   The packet feed is a full APRS-IS stream over HTTP with no passcode, so it is off unless
   `http.packet_stream` is set *and* the caller presents the administrative token.
+- **A message of the day and an alarms panel.** `http.motd_file` names a file whose contents
+  appear as a banner, inserted as raw HTML so a notice can be formatted — trusted at the same
+  level as the configuration file, and read per request so a notice goes up and comes down by
+  creating and deleting the file. `status.json` gains an `alarms` array, always present so a
+  consumer can read an empty one as "healthy"; the first alarm fires when uplinks are
+  configured but not connected, which is currently always, and says why.
 - **`t/c` (CWOP) in the type filter.** Not in the specification's `poimqstunw` letter set,
   but aprsc accepts it, so rejecting it made a filter string that works against the reference
   server an error here. Recognition is a heuristic over the `CW`/`DW`/`EW` callsign series,

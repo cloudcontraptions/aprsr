@@ -81,6 +81,30 @@ status_bind = "0.0.0.0:14501"
 #
 # admin_token = "generate-something-random"
 
+# Serve the relayed packet feed at /events/packets, for the dashboard's live view.
+#
+# Off by default, and it still requires admin_token when on. This is a full APRS-IS feed
+# over HTTP with no passcode and no filter, so turning it on makes the status port a data
+# source rather than only a status page.
+# packet_stream = true
+
+# A file whose contents appear as a banner on the dashboard, for maintenance notices.
+#
+# Inserted as raw HTML so a notice can be formatted, and therefore trusted at the same level
+# as this file: anybody who can write it can already run code as the server user. Do not
+# make it group-writable. A missing or empty file simply means no banner, so a notice goes
+# up and comes down by creating and deleting the file — no restart, no reload.
+# motd_file = "motd.html"
+
+# Tile server for the station map. Sent to the browser rather than compiled into the
+# dashboard bundle, so a closed network can point it somewhere else without rebuilding.
+# Set it to "" to plot stations on a plain background and contact no tile server at all.
+#
+# The default is OpenStreetMap's public tiles, which work out of the box. Their usage policy
+# does not cover heavy traffic, so a busy server should host its own.
+# map_tile_url = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+# map_tile_attribution = "© OpenStreetMap contributors"
+
 # --- Listening ports ----------------------------------------------------------------
 #
 # kind is one of:
