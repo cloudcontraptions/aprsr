@@ -257,6 +257,11 @@ fn parse_listen(
         filter: None,
         max_clients: None,
         hidden: false,
+        // aprsc has no equivalent directive: it binds one socket per address family and
+        // expects the operator to write two `Listen` lines. Leaving this unset means
+        // aprsr's default — an IPv6 bind also accepts IPv4 — which is what the pair of
+        // lines was expressing, so a converted configuration keeps working with one.
+        dual_stack: None,
     };
 
     let mut i = 5;

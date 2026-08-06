@@ -353,6 +353,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "predicates",
+ "rstest",
  "tempfile",
  "tokio",
  "tracing",
@@ -393,8 +394,10 @@ dependencies = [
  "aprsr-store",
  "dashmap",
  "futures-util",
+ "rlimit",
  "rstest",
  "serde",
+ "socket2",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -2747,6 +2750,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "rlimit"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f35ee2729c56bb610f6dba436bf78135f728b7373bdffae2ec815b2d3eb98cc3"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

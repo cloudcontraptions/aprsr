@@ -42,7 +42,10 @@ upstream_timeout = "15s"
 dupecheck_window = "30s"
 # How often to send an idle client a "#" comment line so the connection stays alive.
 keepalive_interval = "20s"
-# File descriptor limit to request at startup — roughly the maximum client count.
+# File descriptor limit to request at startup — roughly the maximum client count, since
+# each connected client holds one descriptor. aprsr raises its soft limit to this at
+# startup, capped by the hard limit; if the hard limit is lower it says so in a warning.
+# Ignored on Windows, which has no equivalent per-process limit.
 file_limit = 10000
 # Packets buffered per client before the oldest are dropped. A client too slow to keep
 # up loses packets rather than stalling the whole server.
@@ -65,7 +68,13 @@ status_bind = "0.0.0.0:14501"
 #   dupefeed  — the packets duplicate detection dropped, for diagnostics
 #   udpsubmit — packet submission only, nothing is sent back
 #
-# "[::]" accepts both IPv6 and IPv4 connections on Linux. Use "0.0.0.0" for IPv4 only.
+# "[::]" accepts both IPv6 and IPv4 connections, on every platform aprsr supports — it
+# sets the socket option explicitly rather than inheriting a default that differs between
+# Linux, Windows and the BSDs. Use "0.0.0.0" to listen on IPv4 only, or set
+# `dual_stack = false` on an IPv6 listener to accept IPv6 only.
+#
+# On Windows, a path elsewhere in this file needs single quotes: TOML treats a backslash
+# in a "double quoted" string as an escape, so run_dir = 'C:\ProgramData\aprsr'.
 
 [[listen]]
 name = "Full feed"
@@ -79,6 +88,8 @@ name = "Client-Defined Filters"
 kind = "igate"
 bind = "[::]:14580"
 max_clients = 1000
+# Accept IPv6 only on this port, refusing IPv4. Left unset an IPv6 bind accepts both.
+# dual_stack = false
 
 # A port with a filter forced on every client, whatever they ask for.
 # [[listen]]

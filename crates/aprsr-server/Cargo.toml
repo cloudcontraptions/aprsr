@@ -16,10 +16,16 @@ aprsr-store.workspace = true
 dashmap.workspace = true
 futures-util.workspace = true
 serde.workspace = true
+socket2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+
+# `limits.file_limit` has no Windows equivalent to apply, so the crate that applies it is
+# not compiled there at all.
+[target.'cfg(unix)'.dependencies]
+rlimit.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

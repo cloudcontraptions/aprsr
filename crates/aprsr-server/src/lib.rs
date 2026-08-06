@@ -19,6 +19,7 @@
 pub mod client;
 pub mod codec;
 pub mod dispatch;
+pub mod limits;
 pub mod listener;
 pub mod metrics;
 pub mod registry;
@@ -145,7 +146,7 @@ impl Server {
     /// When a store is supplied, known station positions are loaded into the cache so
     /// `m/` and `f/` filters work from the first packet rather than after a warm-up.
     pub async fn bind(config: Arc<Config>, store: Option<Store>) -> Result<Self, ServerError> {
-        let listeners = listener::bind_all(&config).await?;
+        let listeners = listener::bind_all(&config)?;
         let mut state = ServerState::new(Arc::clone(&config), store);
 
         if let Some(store) = state.store.as_ref() {

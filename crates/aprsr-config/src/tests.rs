@@ -35,6 +35,46 @@ fn loads_a_minimal_configuration_and_applies_defaults() {
         "TCP is the default protocol"
     );
     assert!(!listener.hidden);
+    assert_eq!(listener.dual_stack, None);
+}
+
+// --- dual-stack listeners ------------------------------------------------------------
+
+/// An IPv6 bind accepts IPv4 unless the operator says otherwise; an IPv4 bind never has
+/// anything to decide. The default matters: `[::]` means "everyone" to the person who
+/// typed it, and before this was set explicitly the answer depended on the kernel.
+#[rstest]
+#[case("[::]:14580", None, true)] // the default an operator gets by writing `[::]`
+#[case("[::]:14580", Some(true), true)] // asked for, spelled out
+#[case("[::]:14580", Some(false), false)] // IPv6 only, deliberately
+#[case("0.0.0.0:14580", None, false)] // an IPv4 socket has no second family to accept
+#[case("0.0.0.0:14580", Some(true), false)] // and cannot be talked into one
+#[case("127.0.0.1:14580", None, false)]
+fn dual_stack_applies_only_to_ipv6_binds(
+    #[case] bind: &str,
+    #[case] dual_stack: Option<bool>,
+    #[case] expected: bool,
+) {
+    let setting = match dual_stack {
+        Some(value) => format!("dual_stack = {value}"),
+        None => String::new(),
+    };
+    let config = Config::from_toml(&format!(
+        r#"
+[server]
+id = "N0CALL-1"
+
+[[listen]]
+name = "Client-Defined Filters"
+kind = "igate"
+bind = "{bind}"
+{setting}
+"#
+    ))
+    .expect("valid");
+
+    let listener = config.listeners.first().expect("one listener");
+    assert_eq!(listener.wants_dual_stack(), expected);
 }
 
 #[test]

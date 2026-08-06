@@ -5,6 +5,7 @@
 
 mod cli;
 mod commands;
+mod signals;
 
 use anyhow::Result;
 use clap::Parser;

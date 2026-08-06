@@ -204,6 +204,27 @@ pub struct Listener {
     /// Hide this port from the public status page.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// Whether an IPv6 bind should also accept IPv4 connections.
+    ///
+    /// Only meaningful when `bind` is an IPv6 address; ignored otherwise. Left unset it
+    /// means "yes", which is almost always what an operator writing `[::]` intends.
+    ///
+    /// This exists because the operating-system default disagrees across platforms —
+    /// Linux usually accepts IPv4 on an IPv6 socket, Windows and the BSDs usually do not.
+    /// aprsr sets the option explicitly so `[::]:14580` behaves the same everywhere
+    /// instead of quietly refusing IPv4 clients on some of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dual_stack: Option<bool>,
+}
+
+impl Listener {
+    /// Whether this listener should accept IPv4 connections on an IPv6 socket.
+    ///
+    /// Meaningless for an IPv4 bind, where it is always false.
+    #[must_use]
+    pub fn wants_dual_stack(&self) -> bool {
+        self.bind.is_ipv6() && self.dual_stack.unwrap_or(true)
+    }
 }
 
 /// How much traffic to take from an uplink.

@@ -9,6 +9,32 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Windows and macOS are tested, not assumed.** CI builds and runs the full suite on
+  `ubuntu-latest`, `macos-latest` and `windows-latest`. Formatting and clippy stay on Linux,
+  where they are not platform-dependent.
+- **Windows console-control events.** A service host stopping aprsr sends
+  `CTRL_CLOSE_EVENT` or `CTRL_SHUTDOWN_EVENT`, not Ctrl-C. aprsr now listens for those and
+  Ctrl-Break as well, so it runs its shutdown path and says goodbye to connected clients
+  instead of having the socket vanish underneath them.
+- **`limits.file_limit` is applied**, having been parsed and ignored since the first
+  release. Each client holds a descriptor, so this is effectively the client cap. Where the
+  hard limit is lower than the configured value aprsr requests the most it can get and
+  warns; Windows has no equivalent per-process limit and says so.
+- **`dual_stack` on a listener**, for an IPv6 port that should accept IPv6 only.
+
+### Fixed
+
+- **`bind = "[::]:14580"` now accepts IPv4 clients on every platform.** aprsr took the
+  operating system's default for `IPV6_V6ONLY`, and that default is not portable: Linux
+  generally accepts IPv4 on an IPv6 socket, Windows and the BSDs generally do not. The same
+  configuration file therefore described two different servers. The option is now set
+  explicitly, and `dual_stack = false` asks for the other behaviour deliberately.
+
+### Changed
+
+- Integration tests wait for the condition they depend on rather than sleeping a fixed
+  50 ms, so they are both faster and reliable on slower and more contended machines.
+
 Initial implementation.
 
 **Protocol** (`aprsr-core`)

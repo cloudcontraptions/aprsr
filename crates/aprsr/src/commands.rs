@@ -11,6 +11,8 @@ use aprsr_server::{Server, ServerState};
 use aprsr_store::Store;
 use tokio::sync::watch;
 
+use crate::signals::{self, SignalAction};
+
 /// How often station positions and counters are written to the database.
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -129,6 +131,11 @@ pub(crate) async fn run(path: &Path) -> Result<()> {
         })?;
     }
 
+    // Before anything opens a descriptor: one client is one descriptor, so this is
+    // effectively the client cap, and raising it afterwards would not help the
+    // connections that had already been refused.
+    aprsr_server::limits::apply_and_report(config.limits.file_limit);
+
     let store = Store::connect(&config.database.url)
         .await
         .with_context(|| format!("could not open the database at {}", config.database.url))?;
@@ -186,35 +193,22 @@ async fn wait_for_shutdown(mut rx: watch::Receiver<bool>) {
     }
 }
 
-/// Set the shutdown flag on SIGINT or SIGTERM.
+/// Set the shutdown flag when the operating system asks aprsr to stop.
+///
+/// Which signals that means is [`crate::signals`]'s problem; this only has to act on the
+/// answer.
 async fn watch_for_signals(tx: watch::Sender<bool>) {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
+    let Some(signal) = signals::next_shutdown_signal().await else {
+        tracing::warn!("no shutdown signal could be listened for; stop aprsr by closing it");
+        return;
+    };
 
-        let mut terminate = match signal(SignalKind::terminate()) {
-            Ok(signal) => signal,
-            Err(error) => {
-                tracing::warn!(%error, "could not listen for SIGTERM");
-                let _ = tokio::signal::ctrl_c().await;
-                let _ = tx.send(true);
-                return;
-            }
-        };
-
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => tracing::info!("received SIGINT"),
-            _ = terminate.recv() => tracing::info!("received SIGTERM"),
+    match signal.action() {
+        SignalAction::Shutdown => {
+            tracing::info!(%signal, "shutting down");
+            let _ = tx.send(true);
         }
     }
-
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("received an interrupt");
-    }
-
-    let _ = tx.send(true);
 }
 
 /// Periodically persist positions and sample counters.

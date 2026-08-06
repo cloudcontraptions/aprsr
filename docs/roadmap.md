@@ -23,8 +23,12 @@ Update this file in the same change that moves an item.
 - **Persistence** — SQLite via SeaORM: station positions (loaded at start, saved every
   minute and at shutdown), connection log, sampled counters with pruning.
 - **Web** — server-rendered dashboard kept live with HTMX, `status.json`, `/healthz`.
-- **Operations** — `run`, `check-config`, `convert-config`, `passcode`; SIGINT/SIGTERM
-  graceful shutdown; text or JSON logs.
+- **Operations** — `run`, `check-config`, `convert-config`, `passcode`; graceful shutdown on
+  SIGINT/SIGTERM and on the Windows console-control events a service host actually sends;
+  text or JSON logs.
+- **Cross-platform** — built and tested on Linux, macOS and Windows in CI. Listener sockets
+  set `IPV6_V6ONLY` explicitly so `[::]` means the same thing everywhere, and
+  `limits.file_limit` raises the descriptor limit where the platform has one.
 
 ## Next
 
