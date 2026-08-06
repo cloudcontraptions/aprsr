@@ -23,8 +23,8 @@ Update this file in the same change that moves an item.
   position ambiguity encodes precision with spaces.
 - **Gating rules** — packets marked `NOGATE`/`RFONLY`, third-party packets that have already
   been on APRS-IS, and general queries are refused at ingest.
-- **Ports** — `fullfeed` and `igate`, per-port forced filters, per-port client caps,
-  `hidden`.
+- **Ports** — all four kinds (`fullfeed`, `igate`, `udpsubmit`, `dupefeed`), per-port forced
+  filters, per-port client caps, `hidden`, and TLS on any of them.
 - **Uplinks** — outbound links to other servers, `full` or `readonly`, with DNS rotation,
   reconnection with backoff, and `upstream_timeout` failover. The peer's identity comes from
   its own handshake, never from configuration. Several configured uplinks are a *failover

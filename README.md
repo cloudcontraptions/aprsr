@@ -69,15 +69,16 @@ reported on stderr rather than dropped silently.
 | **Login** | The full handshake, passcode verification, receive-only (`pass -1`) connections |
 | **q constructs** | `qAC qAX qAU qAo qAO qAS qAr qAR qAZ qAI`, both halves of the algorithm, and the reject rules for loops and internal traffic |
 | **Filters** | `r/ p/ b/ o/ os/ t/ s/ d/ a/ e/ g/ u/ q/ m/ f/` — additive, negatable with `-`, bounded against hostile input |
-| **Duplicates** | A rolling 30-second window keyed on the transmission, not the path |
-| **Ports** | `fullfeed`, `igate` with per-client filters, per-port forced filters and client caps |
-| **Uplinks** | Outbound links to other servers, `full` or `readonly`, with DNS rotation, backoff and failover |
+| **Duplicates** | A rolling 30-second window over the fields the specification names, path ignored |
+| **Ports** | `fullfeed`, `igate`, `udpsubmit` and `dupefeed`, with per-client filters, per-port forced filters and client caps |
+| **Uplinks** | Outbound links to other servers, `full` or `readonly`, with DNS rotation, backoff, and a failover list that keeps exactly one connected |
 | **UDP** | `udpsubmit` ingest, and feed delivery to clients that ask for it with `UDP <port>` |
 | **Access control** | CIDR allow/deny lists, a callsign blocklist, and a per-client rate limit |
 | **TLS** | Listening ports and outbound uplinks, over rustls, with the upstream certificate always verified |
 | **Messaging** | Messages reach the client that gated their addressee whatever its filter says, and the sender's next position follows |
 | **Persistence** | SQLite via SeaORM: station positions, connection log, sampled counters |
 | **Web** | Live dashboard with a station map, history charts and a searchable client table, plus `status.json`, `/metrics` and `/healthz` |
+| **Deployment** | Runs on Linux, macOS and Windows; a container image builds from the repo, and `docs/deploy.md` covers systemd, launchd and Windows services |
 
 Not yet: byte-transparent handling of non-UTF-8 payloads — see
 [`docs/roadmap.md`](docs/roadmap.md). Peer groups and SCTP are **not planned**, and the
