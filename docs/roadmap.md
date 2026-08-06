@@ -26,7 +26,8 @@ Update this file in the same change that moves an item.
 - **Persistence** — SQLite via SeaORM: station positions (loaded at start, saved every
   minute and at shutdown), connection log, sampled counters with pruning.
 - **Web** — server-rendered dashboard driven by the status stream rather than timers, with
-  history sparklines and a station map; `status.json`, `/healthz`.
+  history sparklines, a station map, a searchable and sortable client table with per-client
+  detail, and light and dark themes; `status.json`, `/healthz`.
 - **Observability** — server-sent event streams for status and for the live packet feed,
   `/metrics` in Prometheus text format, and `/api/history` over the sampled counters.
 - **Operations** — `run`, `check-config`, `convert-config`, `passcode`; graceful shutdown on

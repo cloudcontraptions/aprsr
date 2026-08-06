@@ -127,9 +127,19 @@ and `map.*` for the station map. They are split because Leaflet is about as larg
 everything else the page loads, only one panel needs it, and CI compares these files byte for
 byte — a single bundle would make every map change churn the diff for the whole frontend.
 
-The map's testable logic is in `web/src/ts/map.ts` as pure functions over plain objects;
-`leaflet-adapter.ts` is the only file that imports Leaflet and is deliberately thin, because
-it is the part no test covers.
+The TypeScript is split the same way everywhere: the module that decides something takes the
+smallest structural interface that does the job and is tested under vitest's `node`
+environment, and a second, deliberately thin file implements that interface against real
+elements. `map.ts` / `leaflet-adapter.ts` and `table.ts` / `table-dom.ts` are the two worked
+examples; `live.ts`, `stream.ts` and `theme.ts` follow the same rule with their interfaces
+declared inline.
+
+Light and dark mode is one `light-dark()` block in `web/src/css/app.css` rather than a
+`dark:` variant on every class, which works only because the templates use the slate ramp
+purely as a depth scale — dark end for surfaces, light end for text. Reversing the ramp
+reverses the page. `theme.ts` writes `data-theme` on `<html>`; a small inline script in
+`base.html` writes it again before the first paint, because a deferred bundle runs too late
+to stop a flash of the wrong theme.
 
 ### `aprsr`
 

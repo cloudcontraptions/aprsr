@@ -22,6 +22,8 @@ import "htmx.org";
 import { LiveIndicator } from "./live.js";
 import { renderSparklines } from "./charts.js";
 import { StatusStream } from "./stream.js";
+import { attachClientTable } from "./table-dom.js";
+import { ThemeController, describeChoice } from "./theme.js";
 
 /** How often the label is refreshed so "updated 20s ago" keeps counting. */
 const TICK_INTERVAL_MS = 1_000;
@@ -30,6 +32,23 @@ const TICK_INTERVAL_MS = 1_000;
 const CHART_INTERVAL_MS = 60_000;
 
 function start(): void {
+  // The theme first, and outside the guard below: it belongs to every page that extends
+  // `base.html`, not only to one with a live indicator on it.
+  startTheme();
+
+  const reapplyTable = attachClientTable(document);
+  if (reapplyTable) {
+    // HTMX replaces the clients table wholesale every few seconds. The search term, the
+    // sort and any open detail panel live in the controller, so all a swap needs is for
+    // them to be put back.
+    document.body.addEventListener("htmx:afterSwap", (event) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest("[data-client-table]")) {
+        reapplyTable();
+      }
+    });
+  }
+
   const dot = document.getElementById("live-indicator");
   const label = document.querySelector<HTMLElement>("[data-live-label]");
   if (!dot || !label) {
@@ -60,6 +79,51 @@ function start(): void {
   startStatusStream();
   void refreshCharts();
   window.setInterval(() => void refreshCharts(), CHART_INTERVAL_MS);
+}
+
+/**
+ * Wire up the theme toggle.
+ *
+ * The theme itself has already been applied by the inline script in `base.html`, before the
+ * first paint. This adds the control that changes it, and the listener that follows the
+ * operating system while the reader has not overridden it — so a laptop switching to dark at
+ * sunset takes an open dashboard with it.
+ */
+function startTheme(): void {
+  const button = document.querySelector<HTMLElement>("[data-theme-toggle]");
+  const label = document.querySelector<HTMLElement>("[data-theme-label]");
+
+  const media =
+    typeof window.matchMedia === "function"
+      ? window.matchMedia("(prefers-color-scheme: dark)")
+      : null;
+
+  const controller = new ThemeController(
+    document.documentElement,
+    storage(),
+    () => media?.matches ?? false,
+    (choice) => {
+      if (label) label.textContent = describeChoice(choice);
+    },
+  );
+
+  media?.addEventListener("change", () => controller.systemChanged());
+
+  if (!button) return;
+  button.hidden = false;
+  button.addEventListener("click", () => controller.cycle());
+}
+
+/**
+ * `localStorage` throws on access — not on use — in a browser configured to block it, so
+ * even reaching for the global has to be guarded.
+ */
+function storage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
 }
 
 /**

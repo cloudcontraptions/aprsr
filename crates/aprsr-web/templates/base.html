@@ -5,6 +5,32 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title }} — aprsr</title>
     <meta name="description" content="Status of the {{ server_id }} APRS-IS server." />
+    {#-
+      Applied before the first paint, which is the whole reason it is inline and not in
+      app.js: a deferred script runs after the page has been painted, so a reader who chose
+      light mode would see a flash of the dark theme on every navigation.
+
+      It duplicates a few lines of `src/ts/theme.ts` — unavoidable, since nothing bundled can
+      run this early. The duplication is bounded to reading one key and setting one
+      attribute; every other decision about the theme is in `theme.ts` and tested there.
+    -#}
+    <script>
+      (function () {
+        try {
+          var choice = localStorage.getItem("aprsr:theme");
+          if (choice !== "light" && choice !== "dark") choice = "system";
+          var dark =
+            choice === "dark" ||
+            (choice === "system" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.dataset.theme = dark ? "dark" : "light";
+          document.documentElement.dataset.themeChoice = choice;
+        } catch (error) {
+          // Storage disabled, or no matchMedia. The stylesheet's own `color-scheme:
+          // light dark` then follows the system, which is the right answer anyway.
+        }
+      })();
+    </script>
     <link rel="stylesheet" href="/static/app.css" />
     <script src="/static/app.js" defer></script>
     {#- Only the dashboard has a map, and Leaflet is large. Both are loaded there alone. -#}
@@ -21,13 +47,25 @@
           <span class="font-mono text-base text-slate-400">{{ server_id }}</span>
         </h1>
         <p class="text-sm text-slate-400">APRS-IS server</p>
-        <div class="ml-auto flex items-center gap-2 text-xs text-slate-500">
+        <div class="ml-auto flex items-center gap-3 text-xs text-slate-500">
           <span
             id="live-indicator"
             class="inline-block h-2 w-2 rounded-full bg-emerald-500"
             title="Updating"
           ></span>
           <span data-live-label>live</span>
+          {#- Hidden until `theme.ts` reveals it: without JavaScript the stylesheet already
+              follows the operating system, and a button that could not change that would be
+              a lie. -#}
+          <button
+            type="button"
+            data-theme-toggle
+            hidden
+            title="Switch between the system theme, light and dark"
+            class="rounded border border-slate-800 px-2 py-1 text-slate-400 hover:border-slate-700 hover:text-accent-400"
+          >
+            <span data-theme-label>System</span>
+          </button>
         </div>
       </div>
     </header>

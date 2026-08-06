@@ -178,7 +178,19 @@ What good tests look like here:
 2. Interactivity is HTMX first. Reach for TypeScript only when HTMX cannot express it.
 3. Styling is Tailwind utility classes. Shared design tokens live in
    `web/src/css/theme.css` and are used by both the dashboard and the landing page.
-4. **After touching anything under `web/`, run `make web` and commit the regenerated
+4. **Use the slate ramp only as a depth scale** — the dark end for surfaces, the light end
+   for text. That single convention is what makes light mode fifteen lines of
+   `light-dark()` in `web/src/css/app.css` rather than a `dark:` prefix on every class in
+   every template: the ramp is reversed and the whole page inverts. A slate value picked
+   because it looked right, rather than for where it sits on the scale, will invert into
+   something wrong. Anything that is not a depth — an accent, a status colour — gets its own
+   pair of values there.
+5. **Logic goes in a `.ts` module with tests; the DOM goes in a thin adapter.** vitest runs
+   under `environment: "node"` with no DOM at all, so a module that decides something takes
+   the smallest structural interface that does the job and a second file implements it
+   against real elements. `table.ts` / `table-dom.ts` and `map.ts` / `leaflet-adapter.ts`
+   are the two worked examples.
+6. **After touching anything under `web/`, run `make web` and commit the regenerated
    `crates/aprsr-web/static/` output.** CI fails if it is stale. The assets are committed
    so that `cargo run` works on a clone with no Node installed.
 

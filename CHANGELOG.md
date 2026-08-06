@@ -37,6 +37,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   server comes from `/config.json` rather than the bundle, so a closed network can point it
   elsewhere — or set `http.map_tile_url = ""` and have stations drawn on a plain background
   with nothing leaving the browser at all.
+- **Light mode**, with a toggle that cycles between following the operating system and
+  overriding it in either direction. The choice is applied before the first paint, so a
+  reader who chose light never sees a flash of the dark theme, and it is remembered between
+  visits. With JavaScript off the stylesheet follows the operating system on its own, and
+  the toggle — which could not then do anything — is not shown.
+- **Search, sort and a drill-down on the clients table.** The search box matches fields the
+  table has no column for, such as the port kind and the exact login time, so a client can
+  be found by anything an operator remembers about it; terms are ANDed, so a second word
+  narrows rather than widens. Columns sort on the raw numbers the server now emits beside
+  each formatted figure — sorting the rendered text would put `1 002` before `999` — and a
+  third click on a header returns to the server's order, which is connection time. Clicking
+  a row opens a panel with its exact login time in UTC, its port kind, and its byte counts
+  in both directions.
+
+  The search term, the sort and any open panel survive the refresh that replaces the whole
+  table every few seconds, keyed on the registry id, so the table does not reset itself
+  under whoever is reading it.
 - **History sparklines** over the last six hours, drawn from `/api/history`, and
   **`GET /api/stations`** for plotting heard stations with a bounding box and a cap.
 - **Live streams, metrics and counter history.** `GET /events/status` pushes a snapshot a

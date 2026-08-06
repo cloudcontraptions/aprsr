@@ -1,13 +1,49 @@
+{#-
+  The connected clients table.
+
+  Three things beyond a plain table, all driven from `src/ts/table.ts`:
+
+  * a search box, matching against the `data-search` haystack the server builds — which
+    includes fields with no column, so a reader can find a client by its login time;
+  * sortable headers, ordering on the `data-value` attributes rather than the rendered text,
+    because "1 002" sorts before "999" as a string and after it as a number;
+  * a detail row per client, hidden until the row is clicked.
+
+  HTMX replaces this whole section every few seconds. Nothing here stores state in the DOM
+  that must survive that: the search term, the sort and the set of expanded rows all live in
+  the controller and are re-applied after each swap, keyed on the registry id.
+
+  With JavaScript off the search box and the sort buttons are not rendered at all — see the
+  `data-table-controls` block — and the table below is a perfectly good static table.
+-#}
 <section
   id="clients"
   class="mt-8"
   hx-get="/fragments/clients"
   hx-trigger="aprsr:status from:body, every 30s"
   hx-swap="outerHTML"
+  data-client-table
 >
-  <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-400">
-    Connected clients
-  </h2>
+  <div class="mb-3 flex flex-wrap items-baseline gap-x-4 gap-y-2">
+    <h2 class="text-sm font-semibold uppercase tracking-wide text-slate-400">
+      Connected clients
+    </h2>
+    {#- Revealed by table.ts. Hidden by default so a reader without JavaScript is not
+        offered a search box that would do nothing. -#}
+    <div data-table-controls hidden class="ml-auto flex items-center gap-2">
+      <label class="sr-only" for="client-search">Search clients</label>
+      <input
+        id="client-search"
+        type="search"
+        placeholder="Search callsign, address, filter…"
+        autocomplete="off"
+        data-table-search
+        hx-preserve="true"
+        class="w-64 rounded border border-slate-700 bg-slate-900/60 px-2 py-1 text-sm text-slate-200 placeholder:text-slate-600 focus:border-accent-500 focus:outline-none"
+      />
+      <span data-table-count class="text-xs tabular-nums text-slate-500"></span>
+    </div>
+  </div>
 
   {% if clients.is_empty() %}
   <p class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-sm text-slate-500">
@@ -18,21 +54,45 @@
     <table class="min-w-full text-sm">
       <thead class="bg-slate-900/70 text-left text-xs uppercase tracking-wide text-slate-500">
         <tr>
-          <th class="px-4 py-2 font-medium">Callsign</th>
-          <th class="px-4 py-2 font-medium">Address</th>
-          <th class="px-4 py-2 font-medium">Port</th>
-          <th class="px-4 py-2 font-medium">Software</th>
+          <th class="px-4 py-2 font-medium" data-sort="callsign" data-sort-kind="text">Callsign</th>
+          <th class="px-4 py-2 font-medium" data-sort="remote" data-sort-kind="text">Address</th>
+          <th class="px-4 py-2 font-medium" data-sort="listener" data-sort-kind="text">Port</th>
+          <th class="px-4 py-2 font-medium" data-sort="software" data-sort-kind="text">Software</th>
           <th class="px-4 py-2 font-medium">Filter</th>
-          <th class="px-4 py-2 text-right font-medium">Up</th>
-          <th class="px-4 py-2 text-right font-medium">In</th>
-          <th class="px-4 py-2 text-right font-medium">Out</th>
-          <th class="px-4 py-2 text-right font-medium">Dropped</th>
+          <th class="px-4 py-2 text-right font-medium" data-sort="connected" data-sort-kind="number">Up</th>
+          <th class="px-4 py-2 text-right font-medium" data-sort="received" data-sort-kind="number">In</th>
+          <th class="px-4 py-2 text-right font-medium" data-sort="sent" data-sort-kind="number">Out</th>
+          <th class="px-4 py-2 text-right font-medium" data-sort="dropped" data-sort-kind="number">Dropped</th>
         </tr>
       </thead>
-      <tbody class="divide-y divide-slate-800/70">
+      <tbody class="divide-y divide-slate-800/70" data-table-body>
         {% for client in clients %}
-        <tr class="bg-slate-900/20">
+        <tr
+          class="bg-slate-900/20"
+          data-row="{{ client.id }}"
+          data-search="{{ client.search }}"
+          data-callsign="{{ client.callsign }}"
+          data-remote="{{ client.remote }}"
+          data-listener="{{ client.listener }}"
+          data-software="{{ client.software }}"
+          data-connected="{{ client.connected_secs }}"
+          data-received="{{ client.packets_received_value }}"
+          data-sent="{{ client.packets_sent_value }}"
+          data-dropped="{{ client.packets_dropped_value }}"
+        >
           <td class="px-4 py-2 font-mono text-slate-100">
+            {#- The disclosure control. A button rather than a click handler on the row, so
+                it is reachable by keyboard and announced as expandable. -#}
+            <button
+              type="button"
+              data-expand="{{ client.id }}"
+              aria-expanded="false"
+              aria-controls="client-detail-{{ client.id }}"
+              class="mr-1 hidden w-3 text-slate-600 hover:text-accent-400"
+            >
+              <span data-expand-glyph aria-hidden="true">›</span>
+              <span class="sr-only">Details for {{ client.callsign }}</span>
+            </button>
             {{ client.callsign }}
             {% if client.verified %}
             <span
@@ -61,9 +121,54 @@
             {{ client.packets_dropped }}
           </td>
         </tr>
+        {#-
+          The drill-down. Rendered on the server with the rest of the table so it is complete
+          in `view-source` and in the fragment a script fetches, and hidden with the `hidden`
+          attribute so it costs a reader without JavaScript nothing but a little markup.
+        -#}
+        <tr
+          id="client-detail-{{ client.id }}"
+          data-detail="{{ client.id }}"
+          hidden
+          class="bg-slate-900/50"
+        >
+          <td colspan="9" class="px-4 py-3">
+            <dl class="grid grid-cols-2 gap-x-6 gap-y-2 text-xs sm:grid-cols-4">
+              <div>
+                <dt class="text-slate-500">Connected at</dt>
+                <dd class="font-mono text-slate-300">{{ client.connected_at }}</dd>
+              </div>
+              <div>
+                <dt class="text-slate-500">Port kind</dt>
+                <dd class="text-slate-300">{{ client.port_kind }}</dd>
+              </div>
+              <div>
+                <dt class="text-slate-500">Bytes in</dt>
+                <dd class="font-mono text-slate-300">{{ client.bytes_received }}</dd>
+              </div>
+              <div>
+                <dt class="text-slate-500">Bytes out</dt>
+                <dd class="font-mono text-slate-300">{{ client.bytes_sent }}</dd>
+              </div>
+              <div class="col-span-2 sm:col-span-4">
+                <dt class="text-slate-500">Filter</dt>
+                <dd class="packet break-all text-slate-300">{{ client.filter }}</dd>
+              </div>
+            </dl>
+          </td>
+        </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
+  {#- Shown by the controller when a search matches nothing, so an empty table is never
+      mistaken for an empty server. -#}
+  <p
+    data-table-empty
+    hidden
+    class="mt-3 rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-4 text-sm text-slate-500"
+  >
+    No connected client matches that search.
+  </p>
   {% endif %}
 </section>
