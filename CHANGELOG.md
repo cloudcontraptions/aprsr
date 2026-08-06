@@ -281,6 +281,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The administrative endpoints require `http.admin_token` and are disabled entirely when it
   is unset, because the status interface has no other authentication.
 
+### Decided
+
+- **SCTP is not planned**, and `docs/sctp.md` records why in full. aprsc offers it; the
+  APRS-IS specification does not describe it — [Connecting](http://www.aprs-is.net/Connecting.aspx)
+  and [ServerDesign](http://www.aprs-is.net/ServerDesign.aspx) name TCP and UDP and nothing
+  else. That makes it implementation parity rather than feature parity.
+
+  The decisive objection is not the specification, though: it cannot be tested. This kernel
+  has no SCTP support at all, and GitHub's hosted runners refuse to load kernel modules, so
+  the integration test that every other transport here has — bind a socket, connect, push a
+  packet through — cannot be written. Shipping a transport that has never carried a packet,
+  in a server meant to stay up for months, is not something a cargo feature flag makes
+  acceptable.
+
+  The risk flagged when this was planned turned out not to be the problem: `unsafe_code =
+  "forbid"` blocks nothing, because every candidate crate encapsulates the syscalls behind a
+  safe API. `tokio-sctp` compiles against this tree today and passes `cargo deny` clean. The
+  document lists all four candidates that were evaluated, and the three things that would
+  change the answer.
+
+  This resolves the "open question" the roadmap has carried since the first release.
+
 ### Fixed
 
 - **A connection that never logs in no longer delays shutdown.** The login read had its own

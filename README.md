@@ -79,8 +79,9 @@ reported on stderr rather than dropped silently.
 | **Persistence** | SQLite via SeaORM: station positions, connection log, sampled counters |
 | **Web** | Live dashboard with a station map, history charts and a searchable client table, plus `status.json`, `/metrics` and `/healthz` |
 
-Not yet: peer links, SCTP, and byte-transparent handling of non-UTF-8 payloads. All
-of it is in [`docs/roadmap.md`](docs/roadmap.md).
+Not yet: peer links, and byte-transparent handling of non-UTF-8 payloads. All of it is in
+[`docs/roadmap.md`](docs/roadmap.md). SCTP is **not planned** — the reasoning is in
+[`docs/sctp.md`](docs/sctp.md).
 
 ## Layout
 

@@ -82,7 +82,6 @@ to aprsr today, and both get relayed.
   invent one; server commands travel on the connection itself, as
   <http://www.aprs-is.net/Connecting.aspx> describes.
 - **`t/n` NWS matching** — a heuristic over callsign prefixes; see `protocol.md`.
-- **SCTP** — aprsc supports it; whether it is worth carrying forward is an open question.
 - **Historical position tracking** — `station_position` keeps only the latest fix per
   station, which is all `m/` and `f/` need.
 
@@ -90,6 +89,11 @@ to aprsr today, and both get relayed.
 
 - **Rewriting packets beyond the q construct.** APRS-IS relays payloads verbatim, and
   aprsr will not start editing them.
+- **SCTP.** aprsc offers it; APRS-IS does not describe it. It is also untestable in this
+  project's CI — GitHub's hosted runners will not load the kernel module — and Linux-only.
+  The full reasoning, the crates that were evaluated, and the three things that would change
+  the answer are in [`sctp.md`](sctp.md). **This resolves what the roadmap previously listed
+  as an open question.**
 
 ### Reversed
 
