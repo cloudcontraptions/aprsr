@@ -231,6 +231,15 @@ pub struct Limits {
     /// How long a packet is remembered for duplicate detection.
     #[serde(default = "default_dupecheck_window")]
     pub dupecheck_window: Interval,
+    /// How long a client counts as a route back to a station it gated.
+    ///
+    /// The messaging obligation at <http://www.aprs-is.net/ServerDesign.aspx> — a client
+    /// receives messages addressed to any station it has gated — needs a memory of who
+    /// gated what, and this is how long that memory lasts. The specification states the
+    /// obligation without naming a window; the default is a judgement about how often
+    /// stations beacon.
+    #[serde(default = "default_heard_window")]
+    pub heard_window: Interval,
     /// How often to send a keepalive comment line to idle clients.
     #[serde(default = "default_keepalive_interval")]
     pub keepalive_interval: Interval,
@@ -632,6 +641,7 @@ impl Default for Limits {
             client_timeout: default_client_timeout(),
             upstream_timeout: default_upstream_timeout(),
             dupecheck_window: default_dupecheck_window(),
+            heard_window: default_heard_window(),
             keepalive_interval: default_keepalive_interval(),
             file_limit: default_file_limit(),
             client_queue: default_client_queue(),
@@ -661,6 +671,10 @@ fn default_upstream_timeout() -> Interval {
 
 fn default_dupecheck_window() -> Interval {
     Interval::from_secs(aprsr_core::dupecheck::DEFAULT_WINDOW_SECS)
+}
+
+fn default_heard_window() -> Interval {
+    Interval::from_secs(30 * 60)
 }
 
 fn default_keepalive_interval() -> Interval {

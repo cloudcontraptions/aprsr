@@ -443,8 +443,11 @@ pub async fn events_packets(request: HttpRequest, state: web::Data<ServerState>)
 pub async fn metrics(state: web::Data<ServerState>) -> impl Responder {
     let body = crate::metrics_text::render(
         &state.metrics.snapshot(),
-        state.uptime_secs(),
-        state.positions.len(),
+        crate::metrics_text::Gauges {
+            uptime_secs: state.uptime_secs(),
+            stations_tracked: state.positions.len(),
+            stations_gated: state.heard.len(),
+        },
     );
     HttpResponse::Ok()
         .content_type(crate::metrics_text::CONTENT_TYPE)

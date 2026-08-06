@@ -34,6 +34,10 @@ Update this file in the same change that moves an item.
   private authority, and there is no option to skip that.
 - **`dupefeed` ports** — the packets duplicate detection suppressed, delivered verbatim to
   the clients that asked for them.
+- **Messaging** — a message reaches the client it is addressed to and every client that gated
+  its addressee, whatever their filters say, and the sender's next position follows it. The
+  three obligations at <http://www.aprs-is.net/ServerDesign.aspx>, without which messaging
+  works only on unfiltered full feeds.
 - **Dispatch** — single ingest task, bounded per-client queues, slow clients drop packets
   rather than stalling the server.
 - **Persistence** — SQLite via SeaORM: station positions (loaded at start, saved every
@@ -73,8 +77,10 @@ to aprsr today, and both get relayed.
 
 ## Later
 
-- **Server-to-server messaging** — APRS messages addressed to the server itself
-  (aprsc's `messaging.c`).
+- **A `SERVER`-addressed command channel** — a client sending an APRS *message* addressed to
+  `SERVER` and getting a reply. Not described anywhere at aprs-is.net, so aprsr does not
+  invent one; server commands travel on the connection itself, as
+  <http://www.aprs-is.net/Connecting.aspx> describes.
 - **`t/n` NWS matching** — a heuristic over callsign prefixes; see `protocol.md`.
 - **SCTP** — aprsc supports it; whether it is worth carrying forward is an open question.
 - **Historical position tracking** — `station_position` keeps only the latest fix per

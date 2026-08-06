@@ -75,6 +75,7 @@ reported on stderr rather than dropped silently.
 | **UDP** | `udpsubmit` ingest, and feed delivery to clients that ask for it with `UDP <port>` |
 | **Access control** | CIDR allow/deny lists, a callsign blocklist, and a per-client rate limit |
 | **TLS** | Listening ports and outbound uplinks, over rustls, with the upstream certificate always verified |
+| **Messaging** | Messages reach the client that gated their addressee whatever its filter says, and the sender's next position follows |
 | **Persistence** | SQLite via SeaORM: station positions, connection log, sampled counters |
 | **Web** | Live dashboard with a station map, history charts and a searchable client table, plus `status.json`, `/metrics` and `/healthz` |
 

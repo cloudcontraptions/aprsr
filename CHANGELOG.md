@@ -9,6 +9,35 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Messaging works on a filtered port.** [ServerDesign](http://www.aprs-is.net/ServerDesign.aspx)
+  states it plainly: "APRS messaging requires that the client receive any APRS messages
+  destined for the client or any station the client has gated to APRS-IS. The client must
+  also receive the next available position packet for the sending station of those message
+  packets." Three obligations, all of which override the client's filter, and aprsr honoured
+  none of them.
+
+  It matters because a filter is written around a *place* — `r/60/25/100` — and a message
+  from the other side of the world to a station standing next to the IGate matches none of
+  it. Without this the messaging half of APRS works only on unfiltered full feeds, and every
+  IGate on port 14580 silently fails to deliver replies.
+
+  The third obligation is the one that is easy to leave out and impossible to notice missing
+  from inside a server: messages get through, replies get through, and the only symptom is
+  that an IGate cannot tell its operator where the station calling them is.
+
+  Only a client's *own submissions* count as gating. A packet arriving over an uplink was
+  forwarded from upstream, not gated here, and routing replies back up the link would send
+  them to a server rather than to a radio.
+
+  The specification names no time window for any of it, so `limits.heard_window` (default 30
+  minutes) is documented as a judgement about beacon intervals rather than a quoted number,
+  and the courtesy position expires after five — a fix delivered twenty minutes after the
+  message it explains is noise rather than context. `status.json` reports the table as
+  `stations_gated` and `/metrics` as `aprsr_stations_gated`, because "why do messages to my
+  station not arrive" is answered first by whether the station is in it at all.
+
+  A `SERVER`-addressed message channel is **not** implemented: it is not described anywhere
+  at aprs-is.net, and server commands already travel on the connection itself.
 - **TLS**, on listening ports and on outbound uplinks. APRS-IS carries public data, so this
   is not about the packets — it is about the login line, which carries a passcode, and about
   a client on a hostile network being able to tell that the server it reached is the one it

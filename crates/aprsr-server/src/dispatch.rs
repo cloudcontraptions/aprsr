@@ -7,10 +7,13 @@
 //!    <http://www.aprs-is.net/Connecting.aspx>, "only verified (valid passcode) clients
 //!    may send data to APRS-IS";
 //! 2. reject it if it is not well-formed TNC2;
-//! 3. drop it if an identical transmission was seen inside the duplicate window;
-//! 4. apply the q algorithm, which may itself reject the packet as a loop;
-//! 5. record any position it carries;
-//! 6. fan it out to every client whose filter accepts it.
+//! 3. record that the sender gated the packet's source station — before the duplicate
+//!    check, deliberately; see the comment at the call;
+//! 4. drop it if an identical transmission was seen inside the duplicate window;
+//! 5. apply the q algorithm, which may itself reject the packet as a loop;
+//! 6. record any position it carries;
+//! 7. work out who must receive it regardless of their filter — see [`crate::heard`];
+//! 8. fan it out to those clients and to every client whose filter accepts it.
 //!
 //! A single task owns the duplicate checker and runs this loop, fed by a channel from all
 //! the connection tasks. That keeps duplicate detection consistent without a lock on the
@@ -27,8 +30,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::ServerState;
+use crate::heard;
 use crate::metrics::Metrics;
-use crate::registry::ClientId;
+use crate::registry::{ClientId, Outbound};
 
 /// Where a packet came from.
 ///
@@ -135,6 +139,31 @@ pub fn process(
         return Disposition::NotGateable(reject);
     }
 
+    // A client that submits a packet has *gated* its source station onto APRS-IS, which is
+    // what makes that client a route back to it — per
+    // <http://www.aprs-is.net/ServerDesign.aspx>, "any station the client has gated to
+    // APRS-IS". Recorded here, before the duplicate check, and that placement is the whole
+    // point rather than an accident:
+    //
+    // A station heard by two IGates is the ordinary case on APRS, and the second IGate's copy
+    // of every transmission is by definition a duplicate. Recording after the duplicate check
+    // would mean the second gate was never recorded at all for a station whose beacons are
+    // always relayed by the faster one first — which is precisely the well-heard station most
+    // likely to be sent a message. The same applies to a station that re-beacons identical
+    // text inside the duplicate window.
+    //
+    // The cost of the earlier placement is that a packet the q algorithm later rejects as a
+    // loop also counts as a gating. That can only make one misbehaving client — one echoing
+    // this server's own feed back at it — receive some messages it has no use for. The
+    // alternative fails systematically for well-sited IGates, which is much worse.
+    //
+    // Only clients, never uplinks: a packet arriving over an uplink was forwarded from
+    // upstream, not gated here, and routing replies back up the link would send them to a
+    // server rather than to a radio.
+    if let IngestSource::Client(id) = ingest.source {
+        state.heard.record(packet.source(), id, now);
+    }
+
     if dupecheck.check(&packet, now) {
         Metrics::incr(&state.metrics.packets_duplicate);
         // A duplicate is not relayed, but it is not nothing either: it is the *only*
@@ -206,11 +235,16 @@ pub fn process(
         );
     }
 
+    let required = required_recipients(&final_packet, &parsed, state, now);
+
     state.registry.broadcast(
-        &final_packet,
-        &parsed,
-        &rendered,
+        &Outbound {
+            packet: &final_packet,
+            parsed: &parsed,
+            line: &rendered,
+        },
         ingest.source.registry_id(),
+        &required,
         state.positions.as_ref() as &dyn PositionSource,
         &state.metrics,
     );
@@ -223,6 +257,54 @@ pub fn process(
         line: rendered,
         code: outcome.code,
     }
+}
+
+/// The clients that must receive this packet whatever their filters say.
+///
+/// Per <http://www.aprs-is.net/ServerDesign.aspx>: "APRS messaging requires that the client
+/// receive any APRS messages destined for the client or any station the client has gated to
+/// APRS-IS. The client must also receive the next available position packet for the sending
+/// station of those message packets."
+///
+/// Two packet kinds can be in this set and everything else returns immediately:
+///
+/// * a **message**, which goes to the addressee's own connection and to every client that
+///   gated the addressee — and which then makes this server owe those clients a position;
+/// * a **position**, when somebody is owed one from this station.
+///
+/// The cost for everything else is one bitflag test and one relaxed check on an empty map,
+/// which matters because this runs for every packet on the network.
+fn required_recipients(
+    packet: &Tnc2Packet<'_>,
+    parsed: &aprs::ParsedPayload<'_>,
+    state: &ServerState,
+    now: u64,
+) -> Vec<ClientId> {
+    if parsed.types.contains(aprs::PacketType::MESSAGE) {
+        let Some(addressee) = parsed.addressee.filter(|a| !a.is_empty()) else {
+            return Vec::new();
+        };
+
+        let recipients = heard::recipients(
+            &state.heard.clients_for(addressee, now),
+            state.registry.id_of_callsign(addressee),
+        );
+
+        // Obligation three, incurred here and settled by the branch below. Recorded against
+        // the message's *sender*: what an IGate needs in order to make an unsolicited
+        // message usable is where the station calling its operator actually is.
+        state.heard.owe_position(packet.source(), &recipients, now);
+
+        return recipients;
+    }
+
+    // `owes_anything` first: on a server where nobody has exchanged a message, this is one
+    // load and the position path costs nothing at all.
+    if parsed.position.is_some() && state.heard.owes_anything() {
+        return state.heard.take_owed(packet.source(), now);
+    }
+
+    Vec::new()
 }
 
 /// Handle for submitting packets to the dispatch task.

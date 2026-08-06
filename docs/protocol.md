@@ -217,6 +217,57 @@ All three from APRS101:
 A decoder returns nothing rather than a partial result: a filter that cannot establish a
 position must not match a range filter by accident.
 
+## Messaging, and why a filter is not the whole story
+
+Per [ServerDesign](http://www.aprs-is.net/ServerDesign.aspx):
+
+> "If filtering of packets to the client is to be done, the server must properly support APRS
+> messaging. APRS messaging requires that the client receive any APRS messages destined for
+> the client or any station the client has gated to APRS-IS. The client must also receive the
+> next available position packet for the sending station of those message packets."
+
+Three obligations, all of which **override the client's filter**:
+
+| | Rule |
+|---|---|
+| 1 | A message addressed to a client's own callsign reaches that client |
+| 2 | A message addressed to a station a client has *gated* reaches that client |
+| 3 | Having delivered such a message, the server owes that client the **next** position packet from the message's *sender* |
+
+The reason this is a server concern rather than an IGate one: a filter is written around a
+*place* — `r/60/25/100` — and a message from the other side of the world to a station standing
+next to the IGate matches none of it. Without these rules the messaging half of APRS would
+work only on unfiltered full feeds.
+
+Rule 3 is the one that is easy to leave out and impossible to notice missing from inside a
+server: messages get through, replies get through, and the only symptom is that an IGate
+cannot tell its operator where the station calling them is.
+
+How aprsr implements it, in `crates/aprsr-server/src/heard.rs`:
+
+- A client that **submits** a packet has gated its *source* station. Uplinks are excluded: a
+  packet arriving over an uplink was forwarded from upstream, not gated here, and routing
+  replies back up the link would send them to a server rather than to a radio.
+- The record lasts `limits.heard_window`, default 30 minutes. **The specification names no
+  window**; the default is a judgement about beacon intervals, long enough that a station
+  stays reachable between beacons and short enough that a mobile out of range stops having
+  its messages sent to a gateway that can no longer hear it.
+- The courtesy position is owed for five minutes and settled by one packet. Again undocumented
+  — "the next available position packet" has no stated deadline — but a fix delivered twenty
+  minutes after the message it explains is noise rather than context.
+- Both are per-station, bounded by their window and by a cap of 16 clients per station, and
+  pruned by the periodic maintenance task.
+
+`status.json` reports the table size as `stations_gated`, and `/metrics` as
+`aprsr_stations_gated`. "Why do messages to my station not arrive" is answered first by
+whether the station is in the table at all.
+
+**Not implemented: a `SERVER`-addressed command channel.** aprsr accepts server commands on
+the connection itself, as [Connecting](http://www.aprs-is.net/Connecting.aspx) describes
+(`filter …`, in the login line or afterwards). A channel where a client sends an APRS
+*message* addressed to `SERVER` and receives a reply is not described anywhere at
+aprs-is.net, so aprsr does not invent one.
+
 ## Packets that are not relayed
 
 Three classes of packet are refused at ingest, before the q algorithm runs — a packet nobody

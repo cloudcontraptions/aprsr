@@ -44,14 +44,28 @@ struct Metric {
     value: u64,
 }
 
+/// The gauges that are not packet counters, gathered so they cannot be transposed.
+///
+/// A named struct rather than three more positional arguments: `render(totals, uptime,
+/// tracked, gated)` would compile perfectly with the last two swapped, and the mistake would
+/// show up as two plausible-looking numbers on a dashboard.
+#[derive(Debug, Clone, Copy)]
+pub struct Gauges {
+    pub uptime_secs: u64,
+    /// Stations with a known position in the cache.
+    pub stations_tracked: usize,
+    /// Stations a client has gated, so messages to them can be routed back.
+    pub stations_gated: usize,
+}
+
 /// Render the current counters in the Prometheus text exposition format.
 ///
-/// `uptime` is passed rather than read so this stays a pure function of its inputs.
+/// The gauges are passed rather than read so this stays a pure function of its inputs.
 #[must_use]
-pub fn render(totals: &MetricsSnapshot, uptime_secs: u64, stations_tracked: usize) -> String {
+pub fn render(totals: &MetricsSnapshot, gauges: Gauges) -> String {
     let metrics: Vec<Metric> = packet_metrics(totals)
         .into_iter()
-        .chain(connection_metrics(totals, uptime_secs, stations_tracked))
+        .chain(connection_metrics(totals, gauges))
         .collect();
 
     let mut out = String::with_capacity(metrics.len() * 128);
@@ -136,11 +150,7 @@ fn packet_metrics(totals: &MetricsSnapshot) -> [Metric; 10] {
 }
 
 /// Everything about connections, access rules and the server itself.
-fn connection_metrics(
-    totals: &MetricsSnapshot,
-    uptime_secs: u64,
-    stations_tracked: usize,
-) -> [Metric; 7] {
+fn connection_metrics(totals: &MetricsSnapshot, gauges: Gauges) -> [Metric; 8] {
     [
         Metric {
             name: "aprsr_logins_rejected_total",
@@ -176,13 +186,19 @@ fn connection_metrics(
             name: "aprsr_stations_tracked",
             kind: Kind::Gauge,
             help: "Stations with a known position in the cache",
-            value: stations_tracked as u64,
+            value: gauges.stations_tracked as u64,
+        },
+        Metric {
+            name: "aprsr_stations_gated",
+            kind: Kind::Gauge,
+            help: "Stations a client has gated, so messages to them are routed back to it",
+            value: gauges.stations_gated as u64,
         },
         Metric {
             name: "aprsr_uptime_seconds",
             kind: Kind::Gauge,
             help: "Seconds since the server started",
-            value: uptime_secs,
+            value: gauges.uptime_secs,
         },
     ]
 }
@@ -214,9 +230,17 @@ mod tests {
         }
     }
 
+    /// The sample gauges. Distinct values so a test asserting on one cannot pass by
+    /// accidentally matching another.
+    const GAUGES: Gauges = Gauges {
+        uptime_secs: 3600,
+        stations_tracked: 8,
+        stations_gated: 5,
+    };
+
     #[test]
     fn every_metric_has_help_and_type_before_its_value() {
-        let rendered = render(&sample(), 3600, 8);
+        let rendered = render(&sample(), GAUGES);
         for line in rendered.lines().filter(|l| !l.starts_with('#')) {
             let name = line.split(' ').next().expect("a metric name");
             assert!(
@@ -235,9 +259,10 @@ mod tests {
     /// broken. Worth pinning per metric.
     #[test]
     fn levels_are_gauges_and_running_totals_are_counters() {
-        let rendered = render(&sample(), 3600, 8);
+        let rendered = render(&sample(), GAUGES);
         assert!(rendered.contains("# TYPE aprsr_clients_connected gauge"));
         assert!(rendered.contains("# TYPE aprsr_stations_tracked gauge"));
+        assert!(rendered.contains("# TYPE aprsr_stations_gated gauge"));
         assert!(rendered.contains("# TYPE aprsr_uptime_seconds gauge"));
         assert!(rendered.contains("# TYPE aprsr_packets_received_total counter"));
         assert!(rendered.contains("# TYPE aprsr_connections_total counter"));
@@ -246,7 +271,7 @@ mod tests {
     /// The format reserves the `_total` suffix for counters.
     #[test]
     fn only_counters_carry_the_total_suffix() {
-        let rendered = render(&sample(), 3600, 8);
+        let rendered = render(&sample(), GAUGES);
         let mut kind_of = std::collections::HashMap::new();
         for line in rendered.lines() {
             if let Some(rest) = line.strip_prefix("# TYPE ") {
@@ -267,18 +292,26 @@ mod tests {
 
     #[test]
     fn values_are_rendered() {
-        let rendered = render(&sample(), 3600, 8);
+        let rendered = render(&sample(), GAUGES);
         assert!(rendered.contains("\naprsr_packets_received_total 100\n"));
         assert!(rendered.contains("\naprsr_clients_connected 7\n"));
         assert!(rendered.contains("\naprsr_uptime_seconds 3600\n"));
         assert!(rendered.contains("\naprsr_stations_tracked 8\n"));
+        assert!(rendered.contains("\naprsr_stations_gated 5\n"));
     }
 
     /// Every counter the server keeps should be exported, or an operator will find the gap
     /// only when they go looking for the number that is missing.
     #[test]
     fn every_counter_in_the_snapshot_is_exported() {
-        let rendered = render(&sample(), 0, 0);
+        let rendered = render(
+            &sample(),
+            Gauges {
+                uptime_secs: 0,
+                stations_tracked: 0,
+                stations_gated: 0,
+            },
+        );
         let json = serde_json::to_value(sample()).expect("snapshot serialises");
         let fields = json.as_object().expect("an object");
         for field in fields.keys() {

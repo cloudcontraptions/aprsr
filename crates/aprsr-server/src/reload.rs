@@ -146,6 +146,17 @@ pub fn compare(current: &Config, new: &Config) -> ReloadReport {
         ));
     }
 
+    // The age of entries already in the gated-station table. Changing it under them would
+    // make a live gating either expire early or outlive the setting that created it, so the
+    // table is built with the window it will keep. See `heard::Heard::new`.
+    if current.limits.heard_window != new.limits.heard_window {
+        report.requires_restart.push(Change::new(
+            "limits.heard_window",
+            &current.limits.heard_window.as_secs(),
+            &new.limits.heard_window.as_secs(),
+        ));
+    }
+
     // Applied once at startup before anything opens a descriptor, and a soft limit cannot
     // be lowered back down by an unprivileged process anyway.
     if current.limits.file_limit != new.limits.file_limit {

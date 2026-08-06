@@ -7,6 +7,7 @@ expression: top
     "clients",
     "listeners",
     "server",
+    "stations_gated",
     "stations_tracked",
     "totals",
     "uplinks",

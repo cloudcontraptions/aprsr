@@ -27,6 +27,8 @@ pub struct Summary {
     pub bytes_received: String,
     pub bytes_sent: String,
     pub stations_tracked: String,
+    /// Stations a client has gated, so messages to them can be routed back.
+    pub stations_gated: String,
 }
 
 impl Summary {
@@ -54,6 +56,7 @@ impl Summary {
             bytes_received: format::bytes(totals.bytes_received),
             bytes_sent: format::bytes(totals.bytes_sent),
             stations_tracked: format::count(status.stations_tracked as u64),
+            stations_gated: format::count(status.stations_gated as u64),
         }
     }
 }
@@ -344,6 +347,7 @@ mod tests {
             }],
             uplinks: Vec::new(),
             stations_tracked: 8_192,
+            stations_gated: 512,
             alarms: Vec::new(),
         }
     }

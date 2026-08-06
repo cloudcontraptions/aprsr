@@ -40,6 +40,17 @@ upstream_timeout = "15s"
 # spread between IGates hearing the same transmission, short enough not to suppress a
 # station that genuinely re-beacons identical text.
 dupecheck_window = "30s"
+# How long a client counts as a route back to a station it gated onto APRS-IS.
+#
+# APRS-IS servers are required to deliver a message to whichever client gated the station
+# it is addressed to, whatever that client's filter says — otherwise messaging works only
+# on unfiltered full feeds, since a filter is written around a place and a message from
+# the other side of the world matches none of it.
+#
+# Longer than a station's beacon interval, so it stays reachable between beacons; short
+# enough that a mobile which has driven out of an IGate's range stops having its messages
+# sent to a gateway that can no longer hear it.
+heard_window = "30m"
 # How often to send an idle client a "#" comment line so the connection stays alive.
 keepalive_interval = "20s"
 # File descriptor limit to request at startup — roughly the maximum client count, since

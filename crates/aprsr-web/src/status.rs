@@ -28,6 +28,12 @@ pub struct Status {
     pub uplinks: Vec<UplinkInfo>,
     /// Stations whose position the server currently knows.
     pub stations_tracked: usize,
+    /// Stations this server's clients have gated, and can therefore be sent messages.
+    ///
+    /// The messaging obligation at <http://www.aprs-is.net/ServerDesign.aspx> lives or dies
+    /// on this table, and "why do messages to my station not arrive" is answered first by
+    /// whether the station is in it at all.
+    pub stations_gated: usize,
     /// Conditions an operator should know about, empty when there are none.
     ///
     /// Always present rather than omitted when empty: a consumer should be able to read
@@ -235,6 +241,7 @@ impl Status {
             listeners,
             clients,
             stations_tracked: state.positions.len(),
+            stations_gated: state.heard.len(),
             alarms: alarms(&uplinks),
             uplinks,
         }

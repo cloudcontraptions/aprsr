@@ -47,6 +47,13 @@
       <p class="text-xs uppercase tracking-wide text-slate-500">Stations tracked</p>
       <p class="mt-1 font-mono text-lg text-slate-300">{{ summary.stations_tracked }}</p>
     </div>
+    <div
+      class="rounded-lg border border-slate-800/70 bg-slate-900/30 px-4 py-3"
+      title="Stations a client has gated recently, so messages addressed to them are routed back to that client"
+    >
+      <p class="text-xs uppercase tracking-wide text-slate-500">Stations gated</p>
+      <p class="mt-1 font-mono text-lg text-slate-300">{{ summary.stations_gated }}</p>
+    </div>
   </div>
 
   {% if !summary.admin.is_empty() %}

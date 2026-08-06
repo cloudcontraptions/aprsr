@@ -19,6 +19,7 @@
 pub mod client;
 pub mod codec;
 pub mod dispatch;
+pub mod heard;
 pub mod limits;
 pub mod listener;
 pub mod metrics;
@@ -139,6 +140,11 @@ pub struct ServerState {
     pub server_id: Arc<str>,
     pub metrics: Arc<Metrics>,
     pub registry: Arc<ClientRegistry>,
+    /// Which client gated which station, and who is owed a courtesy position.
+    ///
+    /// The messaging half of <http://www.aprs-is.net/ServerDesign.aspx>, which is the one
+    /// thing a filtered port cannot do with filters alone. See [`heard`].
+    pub heard: Arc<heard::Heard>,
     /// Live state for every configured uplink, in configuration order.
     ///
     /// Built once at startup and kept for the life of the process, so an uplink that has
@@ -254,6 +260,12 @@ impl ServerState {
     /// cannot be read, or a server name that is not a name. Both are configuration mistakes
     /// and belong at startup rather than in a reconnect loop.
     pub fn new(config: Arc<Config>, store: Option<Store>) -> Result<Self, ServerError> {
+        // Read before `config` is moved into the lock. The window is deliberately *not*
+        // re-read on reload: it is the age of entries already in the table, and changing it
+        // under them would make a live gating expire early or outlive the setting that
+        // created it. `reload::compare` classifies it accordingly.
+        let heard_window = config.limits.heard_window.as_duration();
+
         Ok(Self {
             server_id: Arc::from(config.server.id.as_str()),
             uplinks: Arc::new(uplink::UplinkRegistry::from_config(&config.uplinks)?),
@@ -263,6 +275,7 @@ impl ServerState {
             config_path: None,
             metrics: Arc::new(Metrics::new()),
             registry: Arc::new(ClientRegistry::new()),
+            heard: Arc::new(heard::Heard::new(heard_window)),
             positions: Arc::new(PositionCache::new()),
             store,
             started_at: now_secs(),

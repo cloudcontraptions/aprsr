@@ -288,7 +288,7 @@ pub(crate) fn report_reload(state: &ServerState) {
     }
 }
 
-/// Periodically persist positions and sample counters.
+/// Periodically persist positions, sample counters, and expire the gated-station table.
 ///
 /// The station positions cache is the working copy; this is what makes it survive a
 /// restart, so `m/` and `f/` filters work immediately rather than after a warm-up.
@@ -332,6 +332,22 @@ async fn maintain(
             now.saturating_sub(i64::try_from(COUNTER_RETENTION.as_secs()).unwrap_or(i64::MAX));
         if let Err(error) = store.prune_counters(cutoff).await {
             tracing::warn!(%error, "could not prune old counter samples");
+        }
+
+        // The gated-station table, which grows with every distinct station a client puts on
+        // APRS-IS. Pruned here rather than on the packet path so that no single station's
+        // first beacon of the hour pays for walking the whole table.
+        let registry = Arc::clone(&state.registry);
+        let dropped = state
+            .heard
+            .prune(aprsr_server::now_secs(), &move |id| registry.contains(id));
+        if dropped > 0 {
+            tracing::debug!(
+                dropped,
+                stations = state.heard.len(),
+                owed = state.heard.owed_len(),
+                "pruned the gated-station table"
+            );
         }
     }
 }

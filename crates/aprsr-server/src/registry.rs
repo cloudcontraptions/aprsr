@@ -148,6 +148,23 @@ pub struct Registration {
     pub outbox: mpsc::Sender<Arc<str>>,
 }
 
+/// One packet on its way out, in the three forms fan-out needs it in.
+///
+/// They always travel together and are always derived from one another — `line` is the
+/// rendered packet, `packet` is that line parsed, `parsed` is its payload classified — so
+/// passing them as one borrow keeps the signature honest about that, and stops a caller
+/// handing over a `line` that is not the packet beside it.
+///
+/// Nothing here is cloned. The `Arc<str>` is cloned once per *recipient*, which is the whole
+/// reason it is an `Arc`.
+#[derive(Debug)]
+pub struct Outbound<'a> {
+    pub packet: &'a Tnc2Packet<'a>,
+    pub parsed: &'a ParsedPayload<'a>,
+    /// The rendered line, exactly as it goes on the wire without its CR/LF.
+    pub line: &'a Arc<str>,
+}
+
 /// Every connected client.
 #[derive(Debug, Default)]
 pub struct ClientRegistry {
@@ -212,6 +229,15 @@ impl ClientRegistry {
         self.clients.get(&id).map(|entry| Arc::clone(entry.value()))
     }
 
+    /// Whether a connection is still registered.
+    ///
+    /// Cheaper than [`ClientRegistry::get`] when the answer is all that is wanted: no `Arc`
+    /// clone. Used by the gated-station table's pruning, which asks it once per entry.
+    #[must_use]
+    pub fn contains(&self, id: ClientId) -> bool {
+        self.clients.contains_key(&id)
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.clients.len()
@@ -254,21 +280,52 @@ impl ClientRegistry {
         clients
     }
 
-    /// Deliver a packet to every client whose filter accepts it.
+    /// The client logged in as `callsign`, if one is connected.
+    ///
+    /// The first half of the messaging rule at <http://www.aprs-is.net/ServerDesign.aspx>:
+    /// "the client receive any APRS messages destined for the client". Uplinks are excluded —
+    /// an uplink's registry callsign is the *upstream server's* identity, and a message
+    /// addressed to a server callsign is not a message for that link.
+    ///
+    /// Case-insensitive, because the addressee comes out of a packet payload and nothing
+    /// validates that. A linear scan: it runs only for message packets, which are a small
+    /// fraction of the feed, and the alternative is a second index to keep in step with
+    /// every connect and disconnect for no measurable gain.
+    #[must_use]
+    pub fn id_of_callsign(&self, callsign: &str) -> Option<ClientId> {
+        self.clients
+            .iter()
+            .find(|entry| {
+                let client = entry.value();
+                !client.connection.is_uplink() && client.callsign.eq_ignore_ascii_case(callsign)
+            })
+            .map(|entry| entry.value().id)
+    }
+
+    /// Deliver a packet to every client whose filter accepts it, plus `required`.
     ///
     /// The source is skipped: APRS-IS does not echo a packet back to the station that
     /// submitted it, and an uplink that received its own traffic back would loop until the
     /// duplicate checker or the q algorithm broke the cycle — which it would, but only after
     /// the packet had crossed the link twice.
+    ///
+    /// `required` is the messaging obligation from
+    /// <http://www.aprs-is.net/ServerDesign.aspx> — the clients that must receive this
+    /// packet whatever their filter says, worked out by [`crate::heard`]. It is passed in as
+    /// a slice rather than looked up here so that the registry keeps knowing only about
+    /// filters: a message reaching a client that did not ask for it is a delivery decision,
+    /// not a matching one, and folding it into `accepts` would make the filter tests lie.
+    ///
+    /// Almost always empty, and checked with a `contains` over a list of at most a handful.
     pub fn broadcast(
         &self,
-        packet: &Tnc2Packet<'_>,
-        parsed: &ParsedPayload<'_>,
-        line: &Arc<str>,
+        outbound: &Outbound<'_>,
         origin: Option<ClientId>,
+        required: &[ClientId],
         positions: &dyn PositionSource,
         metrics: &Metrics,
     ) {
+        let line = outbound.line;
         let bytes = line.len() as u64 + 2; // the CRLF the writer appends
 
         for entry in &self.clients {
@@ -276,7 +333,9 @@ impl ClientRegistry {
             if Some(client.id) == origin {
                 continue;
             }
-            if !accepts(client, packet, parsed, positions) {
+            if !required.contains(&client.id)
+                && !accepts(client, outbound.packet, outbound.parsed, positions)
+            {
                 continue;
             }
 
@@ -408,7 +467,17 @@ mod tests {
         let packet = Tnc2Packet::parse(raw).expect("valid packet");
         let parsed = aprs::parse(&packet);
         let line: Arc<str> = Arc::from(raw);
-        registry.broadcast(&packet, &parsed, &line, None, &NoPositions, metrics);
+        registry.broadcast(
+            &Outbound {
+                packet: &packet,
+                parsed: &parsed,
+                line: &line,
+            },
+            None,
+            &[],
+            &NoPositions,
+            metrics,
+        );
     }
 
     #[test]
@@ -485,10 +554,13 @@ mod tests {
         let parsed = aprs::parse(&packet);
         let line: Arc<str> = Arc::from(BEACON);
         registry.broadcast(
-            &packet,
-            &parsed,
-            &line,
+            &Outbound {
+                packet: &packet,
+                parsed: &parsed,
+                line: &line,
+            },
             Some(client.id),
+            &[],
             &NoPositions,
             &metrics,
         );
@@ -602,10 +674,13 @@ mod tests {
         let parsed = aprs::parse(&packet);
         let line: Arc<str> = Arc::from(BEACON);
         registry.broadcast(
-            &packet,
-            &parsed,
-            &line,
+            &Outbound {
+                packet: &packet,
+                parsed: &parsed,
+                line: &line,
+            },
             Some(uplink.id),
+            &[],
             &NoPositions,
             &metrics,
         );

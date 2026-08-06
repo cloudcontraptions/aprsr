@@ -13,6 +13,7 @@ run_dir = "data"
 client_timeout = "2d"
 upstream_timeout = "15s"
 dupecheck_window = "30s"
+heard_window = "30m"
 keepalive_interval = "20s"
 file_limit = 10000
 client_queue = 1024

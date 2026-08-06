@@ -30,6 +30,7 @@ dispatch::process                 crates/aprsr-server/src/dispatch.rs
   │  3. DupeCheck                   → drop if seen in the last 30 s
   │  4. qconstruct::apply_client    → drop on loop or qAZ; otherwise rewrite the path
   │  5. record any position it carries
+  │  6. work out who must receive it whatever their filter says (heard.rs)
   ▼
 ClientRegistry::broadcast         crates/aprsr-server/src/registry.rs
   │  one Arc<str> cloned per recipient; filters matched per client
@@ -65,6 +66,7 @@ which part of aprsr, so a reader familiar with one can navigate the other.
 | `netlib.c` (UDP paths) | `aprsr-server/src/udp.rs` | `udpsubmit` ingest and `UDP <port>` feed delivery |
 | `http.c`, `status.c` | `aprsr-web/` | Actix Web and Askama replace the embedded HTTP server |
 | `counterdata.c` | `aprsr-server/src/metrics.rs`, `aprsr-store` (`counter_sample`) | Live atomics, sampled to the database |
+| `messaging.c` | `aprsr-server/src/heard.rs` | Who gated which station, so a message reaches the client that can put it back on the air |
 | `acl.c` | `aprsr-core/src/access.rs` + `ratelimit.rs` | Rules live in `[access]` in the one config file, not in separate `.acl` files |
 | `uplink.c` | `aprsr-server/src/uplink.rs` | Outbound links; the supervisor is to an uplink what `accept_loop` is to a listener |
 | `tls.c` | `aprsr-server/src/tls.rs` | rustls rather than OpenSSL: the same stack sea-orm already links, and no system library to find on three platforms |

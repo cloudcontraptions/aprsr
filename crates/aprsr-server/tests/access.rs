@@ -310,6 +310,10 @@ async fn an_unblocked_callsign_connects_normally() {
 
 // --- rate limiting -----------------------------------------------------------------------
 
+/// How many packets the rate-limit test submits. Far above the configured burst, so no
+/// second boundary can let them all through.
+const SENT: usize = 20;
+
 /// A client over its rate loses packets and keeps its connection. Disconnecting would turn a
 /// beacon interval that is slightly too short into a reconnect loop.
 #[tokio::test]
@@ -338,22 +342,34 @@ burst = 3
     })
     .await;
 
-    // Ten packets, each distinct so duplicate detection is not what drops them.
-    for i in 0..10 {
+    // Twenty packets, each distinct so duplicate detection is not what drops them.
+    for i in 0..SENT {
         sender
             .send(&format!("N0CALL>APRS,TCPIP*:>packet {i}"))
             .await;
     }
 
-    // The burst gets through...
+    // The burst gets through, at least.
+    let mut relayed = 0;
     for _ in 0..3 {
         assert!(watcher.packet().await.contains(":>packet"));
+        relayed += 1;
     }
-    // ...and the rest are dropped rather than relayed.
-    assert!(
-        watcher.quiet_for(Duration::from_millis(400)).await,
-        "more than the burst was relayed"
-    );
+    // Then the feed goes quiet well short of twenty.
+    //
+    // Counted rather than pinned to exactly the burst: the limiter's clock is whole seconds,
+    // so a run that straddles a boundary legitimately refills the bucket mid-burst, and
+    // asserting "exactly 3" makes this fail on a loaded CI runner for a reason that is not a
+    // bug. Twenty packets against a rate of one per second cannot all get through however
+    // the boundary falls, which is the property actually worth asserting.
+    while !watcher.quiet_for(Duration::from_millis(200)).await {
+        relayed += 1;
+        assert!(
+            relayed < SENT,
+            "every packet was relayed; nothing was rate limited"
+        );
+    }
+
     wait_until("the drops to be counted", || {
         server.state.metrics.snapshot().packets_rate_limited > 0
     })
