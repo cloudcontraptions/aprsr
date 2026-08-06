@@ -24,6 +24,7 @@ pub mod listener;
 pub mod metrics;
 pub mod registry;
 pub mod reload;
+pub mod uplink;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -119,6 +120,12 @@ pub struct ServerState {
     pub server_id: Arc<str>,
     pub metrics: Arc<Metrics>,
     pub registry: Arc<ClientRegistry>,
+    /// Live state for every configured uplink, in configuration order.
+    ///
+    /// Built once at startup and kept for the life of the process, so an uplink that has
+    /// never connected still appears on the status page saying why — which is the case an
+    /// operator most needs to see.
+    pub uplinks: Arc<uplink::UplinkRegistry>,
     pub positions: Arc<PositionCache>,
     pub store: Option<Store>,
     /// Unix seconds when the server started.
@@ -143,6 +150,7 @@ impl ServerState {
     pub fn new(config: Arc<Config>, store: Option<Store>) -> Self {
         Self {
             server_id: Arc::from(config.server.id.as_str()),
+            uplinks: Arc::new(uplink::UplinkRegistry::from_config(&config.uplinks)),
             config: std::sync::RwLock::new(config),
             config_path: None,
             metrics: Arc::new(Metrics::new()),
@@ -340,11 +348,26 @@ impl Server {
             )));
         }
 
+        // One supervisor per configured uplink. Each owns its own reconnection, so an
+        // upstream server being down affects nothing but its own link.
+        let mut uplink_tasks = Vec::with_capacity(self.state.uplinks.len());
+        for status in self.state.uplinks.all() {
+            uplink_tasks.push(tokio::spawn(uplink::supervise(
+                Arc::clone(status),
+                Arc::clone(&self.state),
+                dispatcher.clone(),
+                signal.clone(),
+            )));
+        }
+
         shutdown.await;
         tracing::info!("shutdown requested");
         let _ = tx.send(true);
 
         for task in accept_tasks {
+            let _ = task.await;
+        }
+        for task in uplink_tasks {
             let _ = task.await;
         }
 

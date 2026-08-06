@@ -9,6 +9,32 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Uplinks.** aprsr connects out to other APRS-IS servers, so a server with an `[[uplink]]`
+  section is a participant in the network rather than a standalone relay between its own
+  clients. `readonly` takes the feed and sends nothing; `full` is bidirectional and needs a
+  valid `server.passcode`, which `check-config` now checks and warns about — an unverified
+  `full` uplink connects and receives, so the failure is otherwise invisible.
+
+  The address is resolved on every attempt and the answers are walked round, because
+  `rotate.aprs.net` is a DNS rotation whose whole purpose is to answer differently each time.
+  One supervisor runs per uplink with a backoff doubling from 5 s to a minute, reset only by
+  a session that lasted long enough to count as working — so a link that connects and
+  immediately drops does not reconnect every five seconds forever.
+  `limits.upstream_timeout`, parsed and unused since the first release, is the other half:
+  an open but silent TCP connection is indistinguishable from a working one at the socket
+  level, and an APRS-IS feed is never silent for that long.
+
+  The upstream server's callsign is taken from its own handshake and never from
+  configuration. It is what goes into a `qAS` construct for everything arriving over the
+  link, an operator configures a hostname, and one hostname answers as a different server
+  every time. An upstream that will not identify itself is not usable as an uplink, and the
+  session is dropped rather than guessed at.
+
+  Uplinks appear on the dashboard and in `status.json` whether or not they are up — an
+  uplink that has never connected is the one an operator needs to see — with the peer's
+  identity, the address actually reached, and the reason for the last failure. The
+  `no_uplink` alarm now reflects reality and clears itself, and a new `uplink_degraded`
+  alarm covers some-up-some-down, which is a different situation from all-down.
 - **Windows and macOS are tested, not assumed.** CI builds and runs the full suite on
   `ubuntu-latest`, `macos-latest` and `windows-latest`. Formatting and clippy stay on Linux,
   where they are not platform-dependent.
@@ -105,6 +131,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A packet relayed by a station other than its source is no longer downgraded.** aprsr
+  applied the q algorithm's `qAR`/`qAr` → `qAo` and `qAS`/`qAC` → `qAO` rules to every
+  verified connection. The specification gates them on the packet having "entered the server
+  from a verified *client-only* connection" — a term it never defines, and which the live
+  network settles: `qAR` constructs whose callsign differs from the packet's source are the
+  most common shape on APRS-IS, and every one of them would have been rewritten to `qAo` at
+  its first server if the ordinary filtered port were client-only.
+
+  The effect was that aprsr rewrote the record of where a packet entered APRS-IS — including
+  every packet from a server uplinking into it — replacing a `qAC` with a claim that the
+  packet had been gated from RF. Nothing downstream could have attributed that to aprsr. The
+  rules are still implemented, and are still tested against the specification's wording; no
+  port aprsr offers now reaches them.
+
+  Two smaller divergences went with it: the `qAC` downgrade lacked its "and callsignssid is
+  not equal to the servercall or login" qualifier, and a packet with no construct from a
+  station that is not the login now gets `,qAS,login` rather than `,qAO,login`.
+
+  Found by the two-server integration test, not by the unit tests — the algorithm's own
+  tests agreed with the algorithm, which is exactly the failure a test at that level cannot
+  catch.
 - **`bind = "[::]:14580"` now accepts IPv4 clients on every platform.** aprsr took the
   operating system's default for `IPV6_V6ONLY`, and that default is not portable: Linux
   generally accepts IPv4 on an IPv6 socket, Windows and the BSDs generally do not. The same
@@ -175,7 +222,7 @@ aprsr is an independent implementation and contains no source code from
 [aprsc](https://github.com/hessu/aprsc), whose architecture it follows with thanks. See
 [`NOTICE`](NOTICE) and [`docs/attribution.md`](docs/attribution.md).
 
-Uplinks, TLS, UDP and ACL enforcement are not in this release; see
+Peer links, TLS, UDP and ACL enforcement are not in this release; see
 [`docs/roadmap.md`](docs/roadmap.md).
 
 [Unreleased]: https://github.com/cloudcontraptions/aprsr/commits/main

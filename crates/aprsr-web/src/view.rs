@@ -88,6 +88,67 @@ impl ListenerRow {
     }
 }
 
+/// One row of the uplinks table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UplinkRow {
+    pub name: String,
+    /// `full feed` or `receive only`.
+    pub kind: &'static str,
+    pub address: String,
+    /// `connected`, `connecting`, `waiting` or `failed`, for the reader.
+    pub state: &'static str,
+    /// Whether the link is up, for the badge colour.
+    pub connected: bool,
+    /// The upstream server's callsign, or an em dash before it has identified itself.
+    pub peer: String,
+    /// The address actually connected to, which a DNS rotation makes worth showing.
+    pub peer_addr: String,
+    pub uptime: String,
+    pub packets_received: String,
+    pub packets_sent: String,
+    /// Why the last attempt failed, or empty when there is nothing to report.
+    pub error: String,
+}
+
+impl UplinkRow {
+    #[must_use]
+    pub fn from_status(status: &Status) -> Vec<Self> {
+        use aprsr_config::UplinkKind;
+        use aprsr_server::uplink::UplinkState;
+
+        status
+            .uplinks
+            .iter()
+            .map(|uplink| Self {
+                name: uplink.name.clone(),
+                kind: match uplink.kind {
+                    UplinkKind::Full => "full feed",
+                    UplinkKind::ReadOnly => "receive only",
+                },
+                address: uplink.address.clone(),
+                state: match uplink.state {
+                    UplinkState::Connected => "connected",
+                    UplinkState::Connecting => "connecting",
+                    // "Failed" is what the code calls it; "waiting" is what is actually
+                    // happening, because the supervisor is between attempts rather than
+                    // giving up. The reason is in the error column beside it.
+                    UplinkState::Failed => "waiting",
+                    UplinkState::Idle => "idle",
+                },
+                connected: uplink.connected,
+                peer: uplink.peer_id.clone().unwrap_or_else(|| "—".to_owned()),
+                peer_addr: uplink.peer_addr.clone().unwrap_or_else(|| "—".to_owned()),
+                uptime: uplink
+                    .connected_secs
+                    .map_or_else(|| "—".to_owned(), format::duration),
+                packets_received: format::count(uplink.packets_received),
+                packets_sent: format::count(uplink.packets_sent),
+                error: uplink.last_error.clone().unwrap_or_default(),
+            })
+            .collect()
+    }
+}
+
 /// One row of the clients table.
 ///
 /// Carries each figure twice: once formatted for a reader, and once raw for the browser to
@@ -271,8 +332,31 @@ mod tests {
                 bytes_received: 4_096,
                 bytes_sent: 1_048_576,
             }],
+            uplinks: Vec::new(),
             stations_tracked: 8_192,
             alarms: Vec::new(),
+        }
+    }
+
+    fn uplink(state: aprsr_server::uplink::UplinkState) -> crate::status::UplinkInfo {
+        use aprsr_config::UplinkKind;
+        use aprsr_server::uplink::UplinkState;
+
+        let connected = state == UplinkState::Connected;
+        crate::status::UplinkInfo {
+            name: "Core rotate".to_owned(),
+            kind: UplinkKind::Full,
+            address: "rotate.aprs.net:10152".to_owned(),
+            state,
+            connected,
+            peer_id: connected.then(|| "T2FINLAND".to_owned()),
+            peer_software: connected.then(|| "aprsc 2.1.11".to_owned()),
+            peer_addr: connected.then(|| "192.0.2.1:10152".to_owned()),
+            connected_at: connected.then_some(1_700_000_000),
+            connected_secs: connected.then_some(5_400),
+            last_error: (!connected).then(|| "connection refused".to_owned()),
+            packets_received: 1_234,
+            packets_sent: 56,
         }
     }
 
@@ -397,6 +481,66 @@ mod tests {
         let row = rows.first().expect("one row");
         assert_eq!(row.software, "—");
         assert_eq!(row.filter, "—");
+    }
+
+    #[test]
+    fn a_connected_uplink_shows_its_peer_and_uptime() {
+        use aprsr_server::uplink::UplinkState;
+
+        let mut status = status();
+        status.uplinks = vec![uplink(UplinkState::Connected)];
+
+        let rows = UplinkRow::from_status(&status);
+        let row = rows.first().expect("one row");
+        assert_eq!(row.name, "Core rotate");
+        assert_eq!(row.kind, "full feed");
+        assert_eq!(row.state, "connected");
+        assert!(row.connected);
+        assert_eq!(row.peer, "T2FINLAND");
+        assert_eq!(row.peer_addr, "192.0.2.1:10152");
+        assert_eq!(row.uptime, "1h 30m");
+        assert_eq!(row.packets_received, "1\u{202f}234");
+        assert!(row.error.is_empty());
+    }
+
+    /// A link between attempts is "waiting", not "failed": the supervisor has not given up,
+    /// and telling an operator it has would send them looking for a problem to fix by hand.
+    #[test]
+    fn an_uplink_between_attempts_reads_as_waiting_and_says_why() {
+        use aprsr_server::uplink::UplinkState;
+
+        let mut status = status();
+        status.uplinks = vec![uplink(UplinkState::Failed)];
+
+        let rows = UplinkRow::from_status(&status);
+        let row = rows.first().expect("one row");
+        assert_eq!(row.state, "waiting");
+        assert!(!row.connected);
+        assert_eq!(row.peer, "—", "nobody has identified themselves");
+        assert_eq!(row.uptime, "—");
+        assert_eq!(row.error, "connection refused");
+    }
+
+    #[test]
+    fn every_uplink_state_has_a_label() {
+        use aprsr_server::uplink::UplinkState;
+
+        for state in [
+            UplinkState::Idle,
+            UplinkState::Connecting,
+            UplinkState::Connected,
+            UplinkState::Failed,
+        ] {
+            let mut status = status();
+            status.uplinks = vec![uplink(state)];
+            let rows = UplinkRow::from_status(&status);
+            assert!(rows.first().is_some_and(|row| !row.state.is_empty()));
+        }
+    }
+
+    #[test]
+    fn a_server_with_no_uplinks_renders_no_rows() {
+        assert!(UplinkRow::from_status(&status()).is_empty());
     }
 
     #[test]

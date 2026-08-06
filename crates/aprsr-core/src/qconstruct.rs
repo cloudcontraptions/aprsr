@@ -130,6 +130,59 @@ pub enum QReject {
     DuplicateInPath { call: String },
 }
 
+/// How a packet got into this server.
+///
+/// The specification's first three branches are mutually exclusive — a packet is a direct
+/// UDP submission, *or* it came from an unverified login, *or* it came from a verified one —
+/// so they are one value rather than three independent flags. Flags would make combinations
+/// like "unverified UDP with a send-only port" expressible, and the algorithm has nothing to
+/// say about those.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QEntry {
+    /// Submitted directly to a UDP port, with no login at all. Earns `qAU`.
+    ///
+    /// Emphatically *not* "arrived over a socket that happens to be UDP": traffic from a peer
+    /// server travelling over UDP is not a client submission and must keep its construct.
+    /// That distinction is why [`apply_server`] is a separate function rather than a flag.
+    Udp,
+    /// A TCP login whose passcode did not verify. Earns `qAX`.
+    Unverified,
+    /// A verified TCP login — the ordinary case.
+    Verified {
+        /// Whether the port is send-only: clients may transmit but receive nothing.
+        send_only: bool,
+        /// Whether the port is a *client-only port* in the specification's sense.
+        ///
+        /// The field most easily set wrongly. The downgrade rules — `qAR`/`qAr` to `qAo`,
+        /// `qAS` to `qAO`, `qAC` to `qAO` — are introduced by "if the packet entered the
+        /// server from a verified **client-only** connection", and exist to stop a restricted
+        /// client claiming to have gated traffic on somebody else's behalf.
+        ///
+        /// **The ordinary filtered port 14580 is not one.** The specification does not define
+        /// the term, but the live network settles it: `qAR` constructs whose callsign differs
+        /// from the packet's source — `OH2RCH>APRX28,WIDE1-1,qAR,OH2RCH-10:` and thousands
+        /// like it — are the single most common shape on APRS-IS. If 14580 were a client-only
+        /// port every one of those would have been downgraded to `qAo` before it left the
+        /// first server. (Undocumented; inferred from observed behaviour of the core servers.)
+        ///
+        /// aprsr therefore sets this false on every port it offers. The branch exists so that
+        /// the implementation of the published algorithm is complete and checkable against it
+        /// rather than quietly missing a case.
+        client_only: bool,
+    },
+}
+
+impl QEntry {
+    /// A verified login on an ordinary bidirectional port — by far the common case.
+    #[must_use]
+    pub const fn verified() -> Self {
+        Self::Verified {
+            send_only: false,
+            client_only: false,
+        }
+    }
+}
+
 /// Everything the algorithm needs to know about the connection a packet arrived on.
 #[derive(Debug, Clone, Copy)]
 pub struct QContext<'a> {
@@ -137,12 +190,8 @@ pub struct QContext<'a> {
     pub server_id: &'a str,
     /// The callsign the sending client logged in as.
     pub login: &'a str,
-    /// Whether the client presented a valid passcode.
-    pub verified: bool,
-    /// Whether the packet arrived over UDP rather than TCP.
-    pub via_udp: bool,
-    /// Whether the port is send-only (clients may transmit but receive nothing).
-    pub send_only: bool,
+    /// How the packet got in.
+    pub entry: QEntry,
 }
 
 /// The result of applying the algorithm: the construct in force and the resulting path.
@@ -167,12 +216,23 @@ pub struct QOutcome {
 /// 2. **UDP direct entry** — replace any existing construct with `qAU,SERVERLOGIN`, or
 ///    append it.
 /// 3. **Unverified connection** — replace with `qAX,SERVERLOGIN`, or append it.
-/// 4. **Trailing `,I` construct** — rewrite `,VIACALL,I` to `,qAR,VIACALL` when VIACALL
+/// 4. **Verified *client-only* connection, FROMCALL ≠ login** — downgrade an existing
+///    construct (`qAR`/`qAr` → `qAo`; `qAS` → `qAO`; `qAC` → `qAO` *only* when its callsign
+///    is neither this server nor the login), rewrite a trailing `,VIACALL,I` to
+///    `,qAo,VIACALL`, or append `,qAO,login` when there is no construct at all.
+/// 5. **Any existing construct is otherwise left alone** — the entry point onto APRS-IS has
+///    already been recorded, and rewriting it would destroy it.
+/// 6. **Trailing `,I` construct** — rewrite `,VIACALL,I` to `,qAR,VIACALL` when VIACALL
 ///    is the logged-in station, otherwise to `,qAr,VIACALL`.
-/// 5. **Verified client, FROMCALL ≠ login** — downgrade an existing construct
-///    (`qAR`/`qAr` → `qAo`; `qAS`/`qAC` → `qAO`), or append `qAO,login` if there is none.
-/// 6. **Verified client, FROMCALL = login** — append `qAC,SERVERLOGIN`, or
-///    `qAO,SERVERLOGIN` on a send-only port.
+/// 7. **FROMCALL = login** — append `qAC,SERVERLOGIN`, or `qAO,SERVERLOGIN` on a send-only
+///    port.
+/// 8. **Otherwise** — append `,qAS,login`. This is a packet somebody else's station sent,
+///    arriving on a port that is not client-only: another server's feed.
+///
+/// The word **client-only** in rule 4 is load-bearing, and is why [`QContext::client_only`]
+/// exists. The downgrade rules exist to stop a *client* claiming to have gated something it
+/// did not; a server relaying its own network's traffic is doing exactly what it is for, and
+/// downgrading there would rewrite the entry point of every packet at every hop.
 ///
 /// Note that this function does not enforce the separate APRS-IS policy that unverified
 /// clients may not inject data at all — that is a connection-level decision made by the
@@ -184,22 +244,68 @@ pub fn apply_client(packet: &Tnc2Packet<'_>, ctx: &QContext<'_>) -> Result<QOutc
     // Rule 1 — rejection.
     check_rejections(path, existing, ctx.server_id)?;
 
-    // Rule 2 — UDP direct entry.
-    if ctx.via_udp {
-        return Ok(replace_or_append(path, existing, QCode::Udp, ctx.server_id));
+    // Rules 2 and 3 — direct UDP entry, and an unverified login.
+    let (send_only, client_only) = match ctx.entry {
+        QEntry::Udp => {
+            return Ok(replace_or_append(path, existing, QCode::Udp, ctx.server_id));
+        }
+        QEntry::Unverified => {
+            return Ok(replace_or_append(
+                path,
+                existing,
+                QCode::Unverified,
+                ctx.server_id,
+            ));
+        }
+        QEntry::Verified {
+            send_only,
+            client_only,
+        } => (send_only, client_only),
+    };
+
+    let from_is_login = packet.source().eq_ignore_ascii_case(ctx.login);
+
+    // Rule 4 — a verified client-only connection relaying somebody else's packet.
+    //
+    // Ahead of the `,I` handling below, because the specification puts it there: on a
+    // client-only port a trailing `,I` becomes `qAo`, not `qAR`/`qAr`.
+    if client_only && !from_is_login {
+        if let Some(found) = existing {
+            let downgraded = match found.code {
+                QCode::VerifiedIgate | QCode::RemoteIgate => Some(QCode::GatedClientOnly),
+                QCode::Server => Some(QCode::NonGated),
+                // "else if the q construct equals ,qAC,callsignssid **and callsignssid is
+                // not equal to the servercall or login**". Without that qualifier a server
+                // uplinking into this one would have the construct it applied to its own
+                // clients' packets rewritten, and the record of where each packet entered
+                // APRS-IS replaced with a claim that it was gated from RF.
+                QCode::VerifiedClient => {
+                    let tagged_by_the_sender = found.call.is_some_and(|call| {
+                        call.eq_ignore_ascii_case(ctx.server_id)
+                            || call.eq_ignore_ascii_case(ctx.login)
+                    });
+                    (!tagged_by_the_sender).then_some(QCode::NonGated)
+                }
+                _ => None,
+            };
+            if let Some(code) = downgraded {
+                return Ok(replace_at(path, found.offset, code, ctx.login));
+            }
+            return Ok(unchanged(path, found.code));
+        }
+        if let Some(igate) = path.i_construct() {
+            return Ok(rewrite_i_construct(path, QCode::GatedClientOnly, igate));
+        }
+        return Ok(append(path, QCode::NonGated, ctx.login));
     }
 
-    // Rule 3 — unverified connection.
-    if !ctx.verified {
-        return Ok(replace_or_append(
-            path,
-            existing,
-            QCode::Unverified,
-            ctx.server_id,
-        ));
+    // Rule 5 — "If a q construct exists in the header: skip to 'All packets with q
+    // constructs'." The entry point is already recorded; leave it.
+    if let Some(found) = existing {
+        return Ok(unchanged(path, found.code));
     }
 
-    // Rule 4 — the legacy `,I` construct.
+    // Rule 6 — the legacy `,I` construct.
     if let Some(igate) = path.i_construct() {
         let code = if igate.eq_ignore_ascii_case(ctx.login) {
             QCode::VerifiedIgate
@@ -209,37 +315,19 @@ pub fn apply_client(packet: &Tnc2Packet<'_>, ctx: &QContext<'_>) -> Result<QOutc
         return Ok(rewrite_i_construct(path, code, igate));
     }
 
-    let from_is_login = packet.source().eq_ignore_ascii_case(ctx.login);
-
-    // Rule 5 — verified client relaying somebody else's packet.
-    if !from_is_login {
-        if let Some(found) = existing {
-            let downgraded = match found.code {
-                QCode::VerifiedIgate | QCode::RemoteIgate => Some(QCode::GatedClientOnly),
-                QCode::Server | QCode::VerifiedClient => Some(QCode::NonGated),
-                _ => None,
-            };
-            if let Some(code) = downgraded {
-                return Ok(replace_at(path, found.offset, code, ctx.login));
-            }
-            return Ok(unchanged(path, found.code));
-        }
-        return Ok(append(path, QCode::NonGated, ctx.login));
+    // Rule 7 — the common case: a station beaconing its own position.
+    if from_is_login {
+        let code = if send_only {
+            QCode::NonGated
+        } else {
+            QCode::VerifiedClient
+        };
+        return Ok(append(path, code, ctx.server_id));
     }
 
-    // An already-tagged packet from the logged-in station keeps its construct: the entry
-    // point has already been recorded and re-tagging would erase it.
-    if let Some(found) = existing {
-        return Ok(unchanged(path, found.code));
-    }
-
-    // Rule 6 — the common case: a station beaconing its own position.
-    let code = if ctx.send_only {
-        QCode::NonGated
-    } else {
-        QCode::VerifiedClient
-    };
-    Ok(append(path, code, ctx.server_id))
+    // Rule 8 — "Else append ,qAS,login". Somebody else's packet on a port that is not
+    // client-only, which in practice means another server's inbound feed.
+    Ok(append(path, QCode::Server, ctx.login))
 }
 
 /// Everything the server-to-server algorithm needs about the link a packet arrived on.
@@ -438,13 +526,27 @@ mod tests {
 
     const SERVER: &str = "T2TEST";
 
+    /// A verified client on one of aprsr's ordinary ports — the common case, and the one
+    /// every port aprsr offers actually uses.
     fn ctx(login: &str) -> QContext<'_> {
         QContext {
             server_id: SERVER,
             login,
-            verified: true,
-            via_udp: false,
-            send_only: false,
+            entry: QEntry::verified(),
+        }
+    }
+
+    /// A verified client on a *client-only port* in the specification's restricted sense.
+    ///
+    /// aprsr has no such port; see [`QEntry::Verified::client_only`]. These cases exist so
+    /// the published algorithm is implemented completely rather than partially.
+    fn client_only_ctx(login: &str) -> QContext<'_> {
+        QContext {
+            entry: QEntry::Verified {
+                send_only: false,
+                client_only: true,
+            },
+            ..ctx(login)
         }
     }
 
@@ -506,8 +608,14 @@ mod tests {
 
     #[test]
     fn ssid_differences_make_the_fromcall_a_different_station() {
-        // N0CALL-1 logging in and sending as N0CALL is relaying, not beaconing.
+        // N0CALL-1 logging in and sending as N0CALL is relaying, not beaconing, so it takes
+        // rule 8 rather than the `qAC` of rule 7.
         let out = apply("N0CALL>APRS,TCPIP*:>status", &ctx("N0CALL-1")).unwrap();
+        assert_eq!(out.code, QCode::Server);
+        assert_eq!(out.path, "TCPIP*,qAS,N0CALL-1");
+
+        // On a client-only port the same packet is a gateway's relay and gets `qAO`.
+        let out = apply("N0CALL>APRS,TCPIP*:>status", &client_only_ctx("N0CALL-1")).unwrap();
         assert_eq!(out.code, QCode::NonGated);
         assert_eq!(out.path, "TCPIP*,qAO,N0CALL-1");
     }
@@ -515,7 +623,10 @@ mod tests {
     #[test]
     fn send_only_port_gets_qao_with_the_server_id() {
         let mut c = ctx("N0CALL");
-        c.send_only = true;
+        c.entry = QEntry::Verified {
+            send_only: true,
+            client_only: false,
+        };
         let out = apply("N0CALL>APRS,TCPIP*:>status", &c).unwrap();
         assert_eq!(out.code, QCode::NonGated);
         assert_eq!(out.path, "TCPIP*,qAO,T2TEST");
@@ -526,7 +637,7 @@ mod tests {
     #[test]
     fn udp_entry_gets_qau() {
         let mut c = ctx("N0CALL");
-        c.via_udp = true;
+        c.entry = QEntry::Udp;
         let out = apply("N0CALL>APRS,TCPIP*:>status", &c).unwrap();
         assert_eq!(out.code, QCode::Udp);
         assert_eq!(out.path, "TCPIP*,qAU,T2TEST");
@@ -535,7 +646,7 @@ mod tests {
     #[test]
     fn udp_entry_replaces_an_existing_construct() {
         let mut c = ctx("N0CALL");
-        c.via_udp = true;
+        c.entry = QEntry::Udp;
         let out = apply("N0CALL>APRS,TCPIP*,qAS,OTHER:>status", &c).unwrap();
         assert_eq!(out.path, "TCPIP*,qAU,T2TEST");
     }
@@ -543,7 +654,7 @@ mod tests {
     #[test]
     fn unverified_connection_gets_qax() {
         let mut c = ctx("N0CALL");
-        c.verified = false;
+        c.entry = QEntry::Unverified;
         let out = apply("N0CALL>APRS,TCPIP*:>status", &c).unwrap();
         assert_eq!(out.code, QCode::Unverified);
         assert_eq!(out.path, "TCPIP*,qAX,T2TEST");
@@ -571,38 +682,46 @@ mod tests {
         assert_eq!(out.path, "qAR,N0GATE");
     }
 
-    // --- Rule 5: relaying somebody else's packet ---------------------------------
+    // --- Rule 5: an existing construct is left alone ------------------------------
+    //
+    // On every port aprsr offers. The construct records where the packet entered APRS-IS;
+    // whichever server first saw it made that record, and no later server may replace it.
 
     #[rstest]
-    #[case("qAR", QCode::GatedClientOnly, "qAo")]
-    #[case("qAr", QCode::GatedClientOnly, "qAo")]
-    #[case("qAS", QCode::NonGated, "qAO")]
-    #[case("qAC", QCode::NonGated, "qAO")]
-    fn existing_construct_is_downgraded_when_fromcall_differs(
-        #[case] incoming: &str,
-        #[case] expected_code: QCode,
-        #[case] expected_wire: &str,
-    ) {
+    #[case("qAR", QCode::VerifiedIgate)] // gated from RF by an IGate
+    #[case("qAr", QCode::RemoteIgate)] // gated via an intermediate server
+    #[case("qAS", QCode::Server)] // entered through another server
+    #[case("qAC", QCode::VerifiedClient)] // a verified client's own beacon
+    #[case("qAU", QCode::Udp)] // submitted over UDP
+    fn an_existing_construct_survives_relaying(#[case] incoming: &str, #[case] expected: QCode) {
         let raw = format!("W1ABC>APRS,TCPIP*,{incoming},SOMEONE:>relayed");
         let out = apply(&raw, &ctx("N0GATE")).unwrap();
-        assert_eq!(out.code, expected_code);
-        assert_eq!(out.path, format!("TCPIP*,{expected_wire},N0GATE"));
-    }
-
-    #[test]
-    fn relaying_with_no_construct_appends_qao_with_the_client_login() {
-        let out = apply("W1ABC>APRS,WIDE1-1:>relayed", &ctx("N0GATE")).unwrap();
-        assert_eq!(out.code, QCode::NonGated);
-        assert_eq!(out.path, "WIDE1-1,qAO,N0GATE");
-    }
-
-    /// A construct that is not in the downgrade table is left alone rather than guessed at.
-    #[test]
-    fn unlisted_construct_passes_through_when_relaying() {
-        let out = apply("W1ABC>APRS,TCPIP*,qAU,OTHER:>relayed", &ctx("N0GATE")).unwrap();
-        assert_eq!(out.code, QCode::Udp);
-        assert_eq!(out.path, "TCPIP*,qAU,OTHER");
+        assert_eq!(out.code, expected);
+        assert_eq!(out.path, format!("TCPIP*,{incoming},SOMEONE"));
         assert!(!out.rewritten);
+    }
+
+    /// This is the shape that dominates APRS-IS: an IGate on the ordinary filtered port
+    /// gating an RF packet, with its own `qAR` and a source that is not its login. If aprsr
+    /// downgraded that to `qAo` it would be rewriting the entry point of most of the network.
+    #[test]
+    fn an_igates_own_qar_is_not_downgraded_on_an_ordinary_port() {
+        let out = apply(
+            "OH2RCH>APRX28,WIDE1-1,qAR,OH2RCH-10:>gated from rf",
+            &ctx("OH2RCH-10"),
+        )
+        .unwrap();
+        assert_eq!(out.code, QCode::VerifiedIgate);
+        assert!(!out.rewritten);
+    }
+
+    /// Rule 8: somebody else's packet, no construct, on a port that is not client-only.
+    /// "Else Append ,qAS,login".
+    #[test]
+    fn relaying_with_no_construct_appends_qas_with_the_senders_login() {
+        let out = apply("W1ABC>APRS,WIDE1-1:>relayed", &ctx("N0GATE")).unwrap();
+        assert_eq!(out.code, QCode::Server);
+        assert_eq!(out.path, "WIDE1-1,qAS,N0GATE");
     }
 
     /// An IGate that already tagged its own packet keeps that tag.
@@ -610,6 +729,107 @@ mod tests {
     fn own_packet_with_existing_construct_is_untouched() {
         let out = apply("N0GATE>APRS,TCPIP*,qAR,N0GATE:>beacon", &ctx("N0GATE")).unwrap();
         assert_eq!(out.code, QCode::VerifiedIgate);
+        assert!(!out.rewritten);
+    }
+
+    // --- Rule 4: the client-only port ---------------------------------------------
+    //
+    // aprsr has no port that sets this, so nothing below runs against a live server. They
+    // are here because a partial implementation of a published algorithm is worse than
+    // none: a reader can check every branch against the specification, and the day aprsr
+    // grows a restricted port the behaviour is already defined and tested.
+
+    #[rstest]
+    #[case("qAR", QCode::GatedClientOnly, "qAo")]
+    #[case("qAr", QCode::GatedClientOnly, "qAo")]
+    #[case("qAS", QCode::NonGated, "qAO")]
+    #[case("qAC", QCode::NonGated, "qAO")]
+    fn a_client_only_port_downgrades_an_existing_construct(
+        #[case] incoming: &str,
+        #[case] expected_code: QCode,
+        #[case] expected_wire: &str,
+    ) {
+        let raw = format!("W1ABC>APRS,TCPIP*,{incoming},SOMEONE:>relayed");
+        let out = apply(&raw, &client_only_ctx("N0GATE")).unwrap();
+        assert_eq!(out.code, expected_code);
+        assert_eq!(out.path, format!("TCPIP*,{expected_wire},N0GATE"));
+    }
+
+    /// "else if the q construct equals ,qAC,callsignssid **and callsignssid is not equal to
+    /// the servercall or login**". Without that qualifier a server logged in here would have
+    /// the construct it applied to its own clients' packets rewritten, and the record of
+    /// where each packet entered APRS-IS replaced by a claim that it was gated from RF.
+    ///
+    /// The `servercall` half of the condition is unreachable — a construct naming this
+    /// server is caught by the loop rule first, which is asserted below — so only the
+    /// `login` half can be exercised. Both are implemented, because the specification states
+    /// both and a reader checking the code against it should find both.
+    #[test]
+    fn a_qac_naming_the_sending_login_is_not_downgraded() {
+        let out = apply(
+            "W1ABC>APRS,TCPIP*,qAC,N0GATE:>relayed",
+            &client_only_ctx("N0GATE"),
+        )
+        .unwrap();
+        assert_eq!(out.code, QCode::VerifiedClient);
+        assert!(
+            !out.rewritten,
+            "the construct was rewritten to {}",
+            out.path
+        );
+    }
+
+    #[test]
+    fn a_qac_naming_this_server_is_a_loop_before_it_can_be_downgraded() {
+        let err = apply(
+            "W1ABC>APRS,TCPIP*,qAC,T2TEST:>relayed",
+            &client_only_ctx("N0GATE"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            QReject::Loop {
+                server_id: SERVER.to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_client_only_port_turns_a_trailing_i_into_qao() {
+        let out = apply(
+            "W1ABC>APRS,WIDE2-1,N0GATE,I:>rf packet",
+            &client_only_ctx("N0GATE"),
+        )
+        .unwrap();
+        assert_eq!(out.code, QCode::GatedClientOnly);
+        assert_eq!(out.path, "WIDE2-1,qAo,N0GATE");
+    }
+
+    #[test]
+    fn a_client_only_port_appends_qao_when_there_is_no_construct() {
+        let out = apply("W1ABC>APRS,WIDE1-1:>relayed", &client_only_ctx("N0GATE")).unwrap();
+        assert_eq!(out.code, QCode::NonGated);
+        assert_eq!(out.path, "WIDE1-1,qAO,N0GATE");
+    }
+
+    /// The downgrade rules are for somebody else's packet. A station's own beacon on a
+    /// client-only port is still an ordinary verified beacon.
+    #[test]
+    fn a_client_only_port_still_tags_the_logins_own_beacon_with_qac() {
+        let out = apply("N0GATE>APRS,TCPIP*:>beacon", &client_only_ctx("N0GATE")).unwrap();
+        assert_eq!(out.code, QCode::VerifiedClient);
+        assert_eq!(out.path, "TCPIP*,qAC,T2TEST");
+    }
+
+    /// A construct that is not in the downgrade table is left alone rather than guessed at.
+    #[test]
+    fn an_unlisted_construct_passes_through_a_client_only_port() {
+        let out = apply(
+            "W1ABC>APRS,TCPIP*,qAU,OTHER:>relayed",
+            &client_only_ctx("N0GATE"),
+        )
+        .unwrap();
+        assert_eq!(out.code, QCode::Udp);
         assert!(!out.rewritten);
     }
 
@@ -676,18 +896,17 @@ mod tests {
             src in "[A-Z0-9-]{1,9}",
             path in "[A-Za-z0-9*,-]{0,60}",
             payload in "[ -~]{1,40}",
-            verified in proptest::bool::ANY,
-            via_udp in proptest::bool::ANY,
+            entry in 0usize..4,
         ) {
             let raw = format!("{src}>APRS,{path}:{payload}");
             let Ok(packet) = Tnc2Packet::parse(&raw) else { return Ok(()) };
-            let c = QContext {
-                server_id: SERVER,
-                login: "N0CALL",
-                verified,
-                via_udp,
-                send_only: false,
+            let entry = match entry {
+                0 => QEntry::Udp,
+                1 => QEntry::Unverified,
+                2 => QEntry::Verified { send_only: true, client_only: false },
+                _ => QEntry::Verified { send_only: false, client_only: true },
             };
+            let c = QContext { server_id: SERVER, login: "N0CALL", entry };
             let _ = apply_client(&packet, &c);
         }
 

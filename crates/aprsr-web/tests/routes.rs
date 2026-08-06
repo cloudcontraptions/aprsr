@@ -49,6 +49,7 @@ fn add_client(state: &ServerState, callsign: &str, filter: &str) -> mpsc::Receiv
         remote: "192.0.2.5:40000".parse().expect("valid address"),
         listener: "Client-Defined Filters".into(),
         port_kind: PortKind::Igate,
+        connection: aprsr_server::registry::ConnectionKind::Client,
         software: Some("aprsr-test 0.1".to_owned()),
         verified: true,
         connected_at: aprsr_server::now_secs(),
@@ -198,6 +199,7 @@ async fn rendered_values_are_escaped() {
         remote: "192.0.2.5:40000".parse().expect("valid address"),
         listener: "Client-Defined Filters".into(),
         port_kind: PortKind::Igate,
+        connection: aprsr_server::registry::ConnectionKind::Client,
         software: Some("<img src=x onerror=alert(1)>".to_owned()),
         verified: true,
         connected_at: aprsr_server::now_secs(),
@@ -613,26 +615,113 @@ async fn a_healthy_server_reports_no_alarms() {
     assert_eq!(json["alarms"].as_array().map(Vec::len), Some(0));
 }
 
-/// An operator who configured an uplink expects to be exchanging traffic. Until uplinks are
-/// implemented they are not, and the status page is where they will look when the server
-/// seems to see nothing.
+/// A configuration with one uplink in it, for the tests below.
+fn state_with_uplinks(count: usize) -> Arc<ServerState> {
+    use std::fmt::Write as _;
+
+    let mut config = CONFIG.to_owned();
+    for index in 0..count {
+        let _ = writeln!(
+            config,
+            "\n[[uplink]]\nname = \"Core {index}\"\nkind = \"full\"\naddress = \"rotate.aprs.net:10152\""
+        );
+    }
+    let loaded = Config::from_toml(&config).expect("valid test configuration");
+    Arc::new(ServerState::new(Arc::new(loaded), None))
+}
+
+/// An operator who configured an uplink expects to be exchanging traffic. A server whose
+/// uplinks are all down looks, from the inside, exactly like a quiet network — and the
+/// status page is where they will look when the server seems to see nothing.
 #[actix_web::test]
 async fn configured_but_unconnected_uplinks_raise_an_alarm() {
-    let config = format!(
-        "{CONFIG}\n[[uplink]]\nname = \"Core rotate\"\nkind = \"full\"\naddress = \"rotate.aprs.net:10152\"\n"
-    );
-    let loaded = Config::from_toml(&config).expect("valid test configuration");
-    let state = Arc::new(ServerState::new(Arc::new(loaded), None));
-
-    let body = body_of(state, "/status.json").await;
+    let body = body_of(state_with_uplinks(1), "/status.json").await;
     let json: serde_json::Value = serde_json::from_str(&body).expect("status.json");
+
     assert_eq!(json["alarms"][0]["name"], "no_uplink");
     assert!(
         json["alarms"][0]["message"]
             .as_str()
-            .is_some_and(|m| m.contains("not implemented")),
+            .is_some_and(|m| m.contains("no connection has been established yet")),
         "the message says why, not just that something is wrong"
     );
+
+    // The uplink itself is listed even though it has never connected — which is exactly the
+    // case an operator needs to see.
+    assert_eq!(json["uplinks"][0]["name"], "Core 0");
+    assert_eq!(json["uplinks"][0]["connected"], false);
+    assert_eq!(json["uplinks"][0]["state"], "idle");
+}
+
+/// The alarm has to clear by itself when the link comes up, or it trains the operator to
+/// ignore the panel.
+#[actix_web::test]
+async fn a_connected_uplink_clears_the_alarm() {
+    let state = state_with_uplinks(1);
+    let uplink = state.uplinks.all().first().cloned().expect("one uplink");
+    uplink.mark_connected_for_test("T2FINLAND", "192.0.2.1:10152".parse().expect("address"));
+
+    let body = body_of(state, "/status.json").await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("status.json");
+
+    assert_eq!(json["alarms"].as_array().map(Vec::len), Some(0));
+    assert_eq!(json["uplinks"][0]["connected"], true);
+    assert_eq!(json["uplinks"][0]["state"], "connected");
+    assert_eq!(json["uplinks"][0]["peer_id"], "T2FINLAND");
+}
+
+/// Some links up and some down is a different situation from all of them down: the server
+/// is still on the network, with less redundancy than configured.
+#[actix_web::test]
+async fn a_partly_connected_set_of_uplinks_reads_as_degraded() {
+    let state = state_with_uplinks(2);
+    let uplinks = state.uplinks.all();
+    if let Some(first) = uplinks.first() {
+        first.mark_connected_for_test("T2FINLAND", "192.0.2.1:10152".parse().expect("address"));
+    }
+    if let Some(second) = uplinks.get(1) {
+        second.mark_failed_for_test("connection refused");
+    }
+
+    let body = body_of(state, "/status.json").await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("status.json");
+
+    assert_eq!(json["alarms"].as_array().map(Vec::len), Some(1));
+    assert_eq!(json["alarms"][0]["name"], "uplink_degraded");
+    assert_eq!(json["uplinks"][1]["last_error"], "connection refused");
+}
+
+/// A standalone server is a legitimate way to run aprsr, and its dashboard should not carry
+/// an empty section for a feature it is not using.
+#[actix_web::test]
+async fn the_uplinks_panel_is_absent_when_none_is_configured() {
+    assert_eq!(body_of(state(), "/fragments/uplinks").await.trim(), "");
+    assert!(!body_of(state(), "/").await.contains("Uplinks"));
+}
+
+#[actix_web::test]
+async fn the_uplinks_panel_lists_every_configured_link() {
+    let state = state_with_uplinks(1);
+    let uplink = state.uplinks.all().first().cloned().expect("one uplink");
+    uplink.mark_connected_for_test("T2FINLAND", "192.0.2.1:10152".parse().expect("address"));
+
+    let body = body_of(state, "/fragments/uplinks").await;
+    assert!(body.contains("Core 0"), "the uplink is named");
+    assert!(body.contains("T2FINLAND"), "and so is its peer");
+    assert!(body.contains("rotate.aprs.net:10152"));
+    assert!(body.contains("connected"));
+}
+
+/// The reason a link is down belongs on the page, not only in the log.
+#[actix_web::test]
+async fn a_failed_uplink_shows_why_on_the_dashboard() {
+    let state = state_with_uplinks(1);
+    let uplink = state.uplinks.all().first().cloned().expect("one uplink");
+    uplink.mark_failed_for_test("could not resolve rotate.aprs.net");
+
+    let body = body_of(state, "/fragments/uplinks").await;
+    assert!(body.contains("waiting"), "not 'failed' — it will try again");
+    assert!(body.contains("could not resolve rotate.aprs.net"));
 }
 
 // --- stations -----------------------------------------------------------------------------

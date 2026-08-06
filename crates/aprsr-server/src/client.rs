@@ -24,17 +24,34 @@ use tokio::sync::mpsc;
 use tokio_util::codec::FramedRead;
 
 use crate::codec::{Line, LineCodec};
-use crate::dispatch::{Dispatcher, Ingest};
+use crate::dispatch::{Dispatcher, Ingest, IngestSource};
 use crate::listener::ListenerContext;
 use crate::metrics::Metrics;
-use crate::registry::{Client, Registration};
+use crate::registry::{Client, ConnectionKind, Registration};
 use crate::{ServerState, Shutdown, now_secs};
+use aprsr_core::qconstruct::QEntry;
 
 /// How long a client has to send its login line before the connection is dropped.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long the writer is given to say goodbye when the server is shutting down.
 const FAREWELL_GRACE: Duration = Duration::from_secs(2);
+
+/// Whether aprsr's listening ports are *client-only ports* in the q algorithm's sense.
+///
+/// They are not, and this is a constant rather than a property of [`PortKind`] because the
+/// answer is the same for all four and the reasoning belongs in one place.
+///
+/// <http://www.aprs-is.net/qalgorithm.aspx> gates its downgrade rules — `qAR`/`qAr` to
+/// `qAo`, `qAS`/`qAC` to `qAO` — on the packet having "entered the server from a verified
+/// client-only connection", but never defines the term. The live network does: `qAR`
+/// constructs whose callsign differs from the packet's source are the most common shape on
+/// APRS-IS, and every one of them would have been downgraded to `qAo` at its first server if
+/// the ordinary filtered port were client-only.
+///
+/// Undocumented; inferred from observed behaviour of the core servers. See
+/// [`aprsr_core::qconstruct::QContext::client_only`], where the rules themselves live.
+const CLIENT_ONLY_PORT: bool = false;
 
 /// Serve one accepted connection until it closes or the server shuts down.
 pub async fn serve(
@@ -207,6 +224,7 @@ async fn register(
         remote: peer,
         listener: Arc::clone(&listener.name),
         port_kind: listener.kind,
+        connection: ConnectionKind::Client,
         software,
         verified: verification.may_transmit(),
         connected_at,
@@ -421,11 +439,13 @@ async fn read_submissions(
 
         let submitted = dispatcher.submit(Ingest {
             line,
-            origin: Some(client.id),
+            source: IngestSource::Client(client.id),
             login: Arc::clone(&client.callsign),
             verified: client.verified,
-            via_udp: false,
-            send_only: listener.kind.is_send_only(),
+            entry: QEntry::Verified {
+                send_only: listener.kind.is_send_only(),
+                client_only: CLIENT_ONLY_PORT,
+            },
         });
 
         if !submitted {

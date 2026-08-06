@@ -29,15 +29,46 @@ impl std::fmt::Display for ClientId {
     }
 }
 
+/// Which side opened a connection, and what that means for the feed.
+///
+/// The registry holds uplinks alongside clients deliberately. Fan-out and the rule that a
+/// packet is never echoed to its own source are the same problem for both, and keeping them
+/// in one collection means there is one implementation of each rather than two that have to
+/// be kept in step. What differs is only what a connection is entitled to receive, which is
+/// exactly what this enum decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionKind {
+    /// A client that connected to one of this server's listeners.
+    Client,
+    /// A server this one connected out to.
+    Uplink {
+        /// Whether packets are sent upstream over this link.
+        ///
+        /// False for a `ro` uplink, which takes the feed and contributes nothing — the safe
+        /// setting for a new server, and the one an operator should start with.
+        transmit: bool,
+    },
+}
+
+impl ConnectionKind {
+    /// Whether this is an outbound link to another server.
+    #[must_use]
+    pub const fn is_uplink(self) -> bool {
+        matches!(self, Self::Uplink { .. })
+    }
+}
+
 /// What the server knows about one connected client.
 #[derive(Debug)]
 pub struct Client {
     pub id: ClientId,
     pub callsign: Arc<str>,
     pub remote: SocketAddr,
-    /// Name of the listener the client arrived on.
+    /// Name of the listener the client arrived on, or of the uplink it is.
     pub listener: Arc<str>,
     pub port_kind: PortKind,
+    /// Whether this connection is a client of ours or a server we called.
+    pub connection: ConnectionKind,
     pub software: Option<String>,
     pub verified: bool,
     /// Unix seconds at login.
@@ -95,6 +126,8 @@ pub struct Registration {
     pub remote: SocketAddr,
     pub listener: Arc<str>,
     pub port_kind: PortKind,
+    /// Defaults to [`ConnectionKind::Client`]; uplinks set it explicitly.
+    pub connection: ConnectionKind,
     pub software: Option<String>,
     pub verified: bool,
     pub connected_at: u64,
@@ -126,6 +159,7 @@ impl ClientRegistry {
             remote: registration.remote,
             listener: registration.listener,
             port_kind: registration.port_kind,
+            connection: registration.connection,
             software: registration.software,
             verified: registration.verified,
             connected_at: registration.connected_at,
@@ -160,15 +194,21 @@ impl ClientRegistry {
     }
 
     /// How many clients are connected to a named listener.
+    ///
+    /// Uplinks are excluded. They are in the registry so that fan-out sees them, but they
+    /// are not clients of a port and must not count against its `max_clients`.
     #[must_use]
     pub fn count_on_listener(&self, listener: &str) -> usize {
         self.clients
             .iter()
-            .filter(|entry| entry.value().listener.as_ref() == listener)
+            .filter(|entry| {
+                let client = entry.value();
+                !client.connection.is_uplink() && client.listener.as_ref() == listener
+            })
             .count()
     }
 
-    /// Every client, ordered by connection time so the dashboard is stable between polls.
+    /// Every connection, ordered by connection time so the dashboard is stable between polls.
     #[must_use]
     pub fn snapshot(&self) -> Vec<Arc<Client>> {
         let mut clients: Vec<Arc<Client>> =
@@ -177,10 +217,20 @@ impl ClientRegistry {
         clients
     }
 
+    /// Every connection that is a client rather than an uplink.
+    #[must_use]
+    pub fn clients(&self) -> Vec<Arc<Client>> {
+        let mut clients = self.snapshot();
+        clients.retain(|client| !client.connection.is_uplink());
+        clients
+    }
+
     /// Deliver a packet to every client whose filter accepts it.
     ///
-    /// The originating client is skipped: APRS-IS does not echo a packet back to the
-    /// station that submitted it.
+    /// The source is skipped: APRS-IS does not echo a packet back to the station that
+    /// submitted it, and an uplink that received its own traffic back would loop until the
+    /// duplicate checker or the q algorithm broke the cycle — which it would, but only after
+    /// the packet had crossed the link twice.
     pub fn broadcast(
         &self,
         packet: &Tnc2Packet<'_>,
@@ -216,27 +266,34 @@ impl ClientRegistry {
     }
 }
 
-/// Whether one client should receive a packet.
+/// Whether one connection should receive a packet.
 fn accepts(
     client: &Client,
     packet: &Tnc2Packet<'_>,
     parsed: &ParsedPayload<'_>,
     positions: &dyn PositionSource,
 ) -> bool {
-    match client.port_kind {
-        // A full feed carries everything that survived duplicate filtering.
-        PortKind::FullFeed => true,
-        // Submission-only and duplicate-diagnostic ports never receive the live feed.
-        PortKind::UdpSubmit | PortKind::DupeFeed => false,
-        PortKind::Igate => {
-            let chain = client.filter();
-            chain.matches(&MatchContext {
-                packet,
-                parsed,
-                client: Some(&client.callsign),
-                positions,
-            })
-        }
+    match client.connection {
+        // An uplink carries this server's whole contribution upstream, or nothing at all.
+        // There is no filtered middle ground: a server that forwarded only part of what it
+        // heard would make the packets it withheld invisible to the rest of APRS-IS, and
+        // nothing downstream could tell that from the packets simply not existing.
+        ConnectionKind::Uplink { transmit } => transmit,
+        ConnectionKind::Client => match client.port_kind {
+            // A full feed carries everything that survived duplicate filtering.
+            PortKind::FullFeed => true,
+            // Submission-only and duplicate-diagnostic ports never receive the live feed.
+            PortKind::UdpSubmit | PortKind::DupeFeed => false,
+            PortKind::Igate => {
+                let chain = client.filter();
+                chain.matches(&MatchContext {
+                    packet,
+                    parsed,
+                    client: Some(&client.callsign),
+                    positions,
+                })
+            }
+        },
     }
 }
 
@@ -260,6 +317,7 @@ mod tests {
                 remote: "192.0.2.1:1234".parse().expect("valid address"),
                 listener: listener.into(),
                 port_kind: kind,
+                connection: ConnectionKind::Client,
                 software: None,
                 verified: true,
                 connected_at: 1_700_000_000,
@@ -407,6 +465,7 @@ mod tests {
             remote: "192.0.2.1:1234".parse().expect("valid address"),
             listener: "full".into(),
             port_kind: PortKind::FullFeed,
+            connection: ConnectionKind::Client,
             software: None,
             verified: true,
             connected_at: 0,
@@ -426,6 +485,75 @@ mod tests {
             "only the queued packet counts as sent"
         );
         assert_eq!(snapshot.packets_dropped_slow, 2);
+    }
+
+    /// An uplink is in the registry so that fan-out reaches it. What it receives is decided
+    /// by whether it may transmit, not by a filter — a server that forwarded only part of
+    /// what it heard would make the rest invisible to the network.
+    #[test]
+    fn a_transmitting_uplink_receives_everything_relayed() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (mut r, mut rx) = registration("Core rotate", PortKind::FullFeed, "");
+        r.connection = ConnectionKind::Uplink { transmit: true };
+        registry.insert(r);
+
+        broadcast(&registry, &metrics, BEACON);
+        assert_eq!(rx.try_recv().as_deref(), Ok(BEACON));
+    }
+
+    #[test]
+    fn a_read_only_uplink_receives_nothing() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (mut r, mut rx) = registration("Core rotate", PortKind::FullFeed, "");
+        r.connection = ConnectionKind::Uplink { transmit: false };
+        registry.insert(r);
+
+        broadcast(&registry, &metrics, BEACON);
+        assert!(rx.try_recv().is_err(), "a ro uplink never transmits");
+        assert_eq!(metrics.snapshot().packets_sent, 0);
+    }
+
+    /// A packet that arrived over an uplink must not be sent straight back up it.
+    #[test]
+    fn an_uplink_is_skipped_for_its_own_traffic() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (mut r, mut rx) = registration("Core rotate", PortKind::FullFeed, "");
+        r.connection = ConnectionKind::Uplink { transmit: true };
+        let uplink = registry.insert(r);
+
+        let packet = Tnc2Packet::parse(BEACON).expect("valid packet");
+        let parsed = aprs::parse(&packet);
+        let line: Arc<str> = Arc::from(BEACON);
+        registry.broadcast(
+            &packet,
+            &parsed,
+            &line,
+            Some(uplink.id),
+            &NoPositions,
+            &metrics,
+        );
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// An uplink holds a descriptor but is not a client of a port, so it must not count
+    /// against that port's `max_clients` — which would let a full port refuse the uplink.
+    #[test]
+    fn uplinks_do_not_count_against_a_listener_cap() {
+        let registry = ClientRegistry::new();
+        let (client, _rc) = registration("Clients", PortKind::Igate, "t/p");
+        let (mut uplink, _ru) = registration("Clients", PortKind::FullFeed, "");
+        uplink.connection = ConnectionKind::Uplink { transmit: true };
+        registry.insert(client);
+        registry.insert(uplink);
+
+        assert_eq!(registry.count_on_listener("Clients"), 1);
+        assert_eq!(registry.len(), 2, "both are in the registry");
+        assert_eq!(registry.clients().len(), 1, "only one is a client");
+        assert_eq!(registry.snapshot().len(), 2);
     }
 
     #[test]

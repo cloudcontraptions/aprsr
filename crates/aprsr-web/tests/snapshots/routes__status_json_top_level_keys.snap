@@ -9,4 +9,5 @@ expression: top
     "server",
     "stations_tracked",
     "totals",
+    "uplinks",
 ]

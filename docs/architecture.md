@@ -65,7 +65,7 @@ which part of aprsr, so a reader familiar with one can navigate the other.
 | `http.c`, `status.c` | `aprsr-web/` | Actix Web and Askama replace the embedded HTTP server |
 | `counterdata.c` | `aprsr-server/src/metrics.rs`, `aprsr-store` (`counter_sample`) | Live atomics, sampled to the database |
 | `acl.c` | `aprsr-store` (`acl_entry`) | Table exists; enforcement is on the roadmap |
-| `uplink.c` | — | On the roadmap |
+| `uplink.c` | `aprsr-server/src/uplink.rs` | Outbound links; the supervisor is to an uplink what `accept_loop` is to a listener |
 | `tls.c`, `sctp.c` | — | On the roadmap |
 | `hmalloc.c`, `cellmalloc.c`, `keyhash.c`, `xpoll.c`, `rwlock.c` | — | No equivalent needed: Rust's allocator, `ahash`, tokio and `std::sync` cover these |
 
@@ -113,6 +113,18 @@ use port 0. `codec` frames lines (see its module docs for why it is not
 `tokio_util::codec::LinesCodec`). `client` runs the handshake and the two halves of a
 connection. `registry` holds clients and fans out. `dispatch` decides each packet's fate.
 `metrics` is relaxed atomics shared with the web crate.
+
+`uplink` is `client` with the roles reversed — aprsr dials out and speaks first. Its
+`supervise` is the counterpart of `accept_loop`: it owns DNS rotation, reconnection and
+backoff, so one session is about one session and a connection never decides its own fate.
+
+**Uplinks live in the client registry, peer groups will not.** An uplink is one connection
+with one identity, so putting it beside the clients means fan-out and the never-echo-to-the-
+source rule have one implementation instead of two; `ConnectionKind` is the only thing that
+distinguishes them, and it decides only what a connection is entitled to receive. A peer
+group is one UDP socket with N destinations and does not fit that shape at all, so when it
+arrives it will hang off `ServerState` rather than being forced into the registry. That
+asymmetry is deliberate.
 
 ### `aprsr-web`
 

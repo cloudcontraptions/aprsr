@@ -55,12 +55,37 @@ pub(crate) fn check_config(path: &Path) -> Result<()> {
 
     if !config.uplinks.is_empty() {
         println!();
-        println!("  uplinks (parsed, not yet connected — see docs/roadmap.md):");
+        println!("  uplinks:");
         for uplink in &config.uplinks {
             println!(
                 "    {:<28} {:?} {}",
                 uplink.name, uplink.kind, uplink.address
             );
+        }
+
+        // A `full` uplink logs in with `server.passcode`, and an unverified login can
+        // receive but not transmit. That is a silent half-failure — the link comes up, the
+        // dashboard says connected, and nothing this server hears reaches the network — so
+        // it is worth catching here rather than in a log line a week later.
+        let transmits = config
+            .uplinks
+            .iter()
+            .any(|uplink| uplink.kind == aprsr_config::UplinkKind::Full);
+        if transmits
+            && aprsr_core::passcode::verify(&config.server.id, config.server.passcode)
+                != aprsr_core::passcode::Verification::Verified
+        {
+            println!();
+            println!(
+                "  warning: a \"full\" uplink is configured but server.passcode does not \
+                 verify for {}.",
+                config.server.id
+            );
+            println!(
+                "           The link will connect and receive, but nothing this server hears \
+                 will reach"
+            );
+            println!("           the network. Use `aprsr passcode` to generate the right value.");
         }
     }
 

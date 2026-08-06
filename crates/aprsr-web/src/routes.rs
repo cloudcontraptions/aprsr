@@ -19,7 +19,7 @@ use askama_web::WebTemplate;
 
 use crate::sse;
 use crate::status::Status;
-use crate::view::{ClientRow, ListenerRow, Summary};
+use crate::view::{ClientRow, ListenerRow, Summary, UplinkRow};
 
 /// Header carrying the administrative token.
 ///
@@ -43,6 +43,9 @@ struct DashboardTemplate {
     /// exactly the same markup.
     summary_html: String,
     listeners_html: String,
+    /// Empty when no uplink is configured — the fragment renders nothing at all in that
+    /// case, so a standalone server gets no empty "Uplinks" heading.
+    uplinks_html: String,
     clients_html: String,
 }
 
@@ -56,6 +59,12 @@ struct SummaryTemplate {
 #[template(path = "fragments/listeners.html")]
 struct ListenersTemplate {
     listeners: Vec<ListenerRow>,
+}
+
+#[derive(Debug, Template, WebTemplate)]
+#[template(path = "fragments/uplinks.html")]
+struct UplinksTemplate {
+    uplinks: Vec<UplinkRow>,
 }
 
 #[derive(Debug, Template, WebTemplate)]
@@ -81,6 +90,11 @@ pub async fn dashboard(state: web::Data<ServerState>) -> impl Responder {
     }
     .render()
     .unwrap_or_default();
+    let uplinks_html = UplinksTemplate {
+        uplinks: UplinkRow::from_status(&status),
+    }
+    .render()
+    .unwrap_or_default();
     let clients_html = ClientsTemplate {
         clients: ClientRow::from_status(&status),
     }
@@ -95,6 +109,7 @@ pub async fn dashboard(state: web::Data<ServerState>) -> impl Responder {
         map: true,
         summary_html,
         listeners_html,
+        uplinks_html,
         clients_html,
     }
 }
@@ -130,6 +145,18 @@ pub async fn fragment_listeners(state: web::Data<ServerState>) -> impl Responder
     let status = Status::capture(&state);
     ListenersTemplate {
         listeners: ListenerRow::from_status(&status),
+    }
+}
+
+/// `GET /fragments/uplinks` — the outbound links table.
+///
+/// Renders nothing at all when no uplink is configured, which is what keeps a standalone
+/// server's dashboard from carrying an empty section for a feature it is not using.
+#[get("/fragments/uplinks")]
+pub async fn fragment_uplinks(state: web::Data<ServerState>) -> impl Responder {
+    let status = Status::capture(&state);
+    UplinksTemplate {
+        uplinks: UplinkRow::from_status(&status),
     }
 }
 

@@ -21,6 +21,9 @@ Update this file in the same change that moves an item.
   been on APRS-IS, and general queries are refused at ingest.
 - **Ports** — `fullfeed` and `igate`, per-port forced filters, per-port client caps,
   `hidden`.
+- **Uplinks** — outbound links to other servers, `full` or `readonly`, with DNS rotation,
+  reconnection with backoff, and `upstream_timeout` failover. The peer's identity comes from
+  its own handshake, never from configuration.
 - **Dispatch** — single ingest task, bounded per-client queues, slow clients drop packets
   rather than stalling the server.
 - **Persistence** — SQLite via SeaORM: station positions (loaded at start, saved every
@@ -42,11 +45,11 @@ Update this file in the same change that moves an item.
 
 ## Next
 
-**Uplink and peer links** — the largest gap. Without them aprsr is a standalone server
-rather than a participant in the APRS-IS mesh. Configuration is already parsed and
-validated (`[[uplink]]`), and `check-config` says plainly that it is not connected.
-Needs: outbound connection with reconnect and rotation, the server-to-server half of the q
-algorithm (`qAS`, `qAr` via an intermediate server), and the `UpstreamTimeout` failover.
+**Peer links** — uplinks are done; peer groups are not. A peer group is a UDP mesh between
+servers at the same tier rather than a tree of outbound TCP connections, so it does not reuse
+the uplink code: one socket with N destinations, and loop prevention that cannot lean on a
+per-connection registry entry. Its framing is undocumented upstream, which makes it the least
+certain thing left on this list.
 
 **UDP** — `udpsubmit` ports and UDP delivery to clients that asked for it in their login
 (`UDP <port>`). The configuration is parsed; `bind_all` logs that UDP listeners are not

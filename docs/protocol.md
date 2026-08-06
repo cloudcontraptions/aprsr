@@ -59,18 +59,54 @@ packets**; unverified submissions are counted and dropped.
 
 ## q constructs
 
+Two algorithms, not one. Which runs is decided by where the packet came from, and by nothing
+else: `IngestSource::Client` takes the client half, `IngestSource::Uplink` the server half.
+They are separate functions with separate context types rather than one function with a flag,
+because the same fact means different things on the two paths — `via_udp` on a client
+connection means "submitted to a `udpsubmit` port" and earns `qAU`, while traffic from a peer
+server that happens to travel over UDP means nothing of the sort.
+
+### From a client
+
 Implemented from [the q Algorithm](http://www.aprs-is.net/qalgorithm.aspx), in this order:
 
 1. **Reject** `qAZ`; a `qAC` with no `TCPIP`/`TCPXX` marker; a path in which this server
    already appears after the q construct; a path with a repeated callsign-SSID.
 2. **UDP entry** → replace any existing construct with `qAU,SERVERLOGIN`, or append it.
 3. **Unverified** → `qAX,SERVERLOGIN`.
-4. **Trailing `,VIACALL,I`** → rewrite to `,qAR,VIACALL` when VIACALL is the logged-in
+4. **Client-only port, FROMCALL ≠ login** → downgrade an existing construct (`qAR`/`qAr` →
+   `qAo`; `qAS` → `qAO`; `qAC` → `qAO` *only* when its callsign is neither this server nor
+   the login), rewrite `,VIACALL,I` to `,qAo,VIACALL`, or append `,qAO,login`.
+   **No port aprsr offers is a client-only port** — see below.
+5. **Any existing construct is otherwise left alone.** It records where the packet entered
+   APRS-IS, and no later server may replace that.
+6. **Trailing `,VIACALL,I`** → rewrite to `,qAR,VIACALL` when VIACALL is the logged-in
    station, otherwise `,qAr,VIACALL`.
-5. **Verified, FROMCALL ≠ login** → downgrade an existing construct (`qAR`/`qAr` → `qAo`;
-   `qAS`/`qAC` → `qAO`), or append `qAO,login`.
-6. **Verified, FROMCALL = login** → append `qAC,SERVERLOGIN`, or `qAO,SERVERLOGIN` on a
-   send-only port.
+7. **FROMCALL = login** → append `qAC,SERVERLOGIN`, or `qAO,SERVERLOGIN` on a send-only port.
+8. **Otherwise** → append `,qAS,login`.
+
+**On "client-only port".** The specification gates rule 4 on the packet having "entered the
+server from a verified *client-only* connection", and never defines the term. The live
+network does: `qAR` constructs whose callsign differs from the packet's source —
+`OH2RCH>APRX28,WIDE1-1,qAR,OH2RCH-10:` and the thousands like it — are the most common shape
+on APRS-IS, and every one of them would have been downgraded to `qAo` at its first server if
+the ordinary filtered port 14580 were client-only. aprsr therefore treats none of its ports
+as one. The rules are implemented and tested anyway, because a partial implementation of a
+published algorithm is worse than a complete one nothing currently reaches.
+*Undocumented; inferred from observed behaviour of the core servers.*
+
+### From an uplink or a peer
+
+1. **Reject** on the same grounds as rule 1 above — those are facts about the packet and the
+   path, not about how it arrived.
+2. **A `qAI` trace** accumulates the sending server's login and then this server's.
+3. **Trailing `,I`** → `,qAr,VIACALL`. Always lowercase: the uppercase `qAR` means the IGate
+   was directly connected to *this* server, and a packet that reached us through another
+   server by definition was not.
+4. **An existing construct is left alone.**
+5. **Otherwise** → append `,qAS,<peer login>`, where the login is the identity the upstream
+   server gave in its own handshake — never a value from configuration. An operator configures
+   a hostname, and `rotate.aprs.net` answers as a different server on every connection.
 
 Loop detection treats `WIDEn-N`, `TRACEn-N`, `RELAY`, `ECHO`, `GATE`, `TCPIP` and `TCPXX`
 as routing aliases that may legitimately repeat within one path; any other repeated

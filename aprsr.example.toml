@@ -145,12 +145,29 @@ max_clients = 1000
 
 # --- Uplinks ------------------------------------------------------------------------
 #
-# Uplink support is on the roadmap and is not active in this release; the configuration
-# is parsed and validated so existing files keep working.
+# Outbound connections to other APRS-IS servers. Without at least one, aprsr is a
+# standalone server: it relays between its own clients and exchanges nothing with the
+# rest of the network.
 #
-# kind is "full" for a bidirectional feed or "readonly" to never transmit upstream.
+# kind is:
+#   "readonly"  take the feed, send nothing upstream. Start here.
+#   "full"      bidirectional — this server's clients' traffic goes onto APRS-IS.
+#
+# A "full" uplink needs a valid server.passcode above, and a valid tier-2 registration
+# for the callsign. Without one the link still connects and still receives, but the
+# upstream server refuses to relay what this one sends. `aprsr check-config` warns about
+# exactly that case, and the dashboard says "connected" either way — so check it.
+#
+# The address is resolved on every connection attempt, never cached. rotate.aprs.net is
+# a DNS rotation that answers with a different server each time, and aprsr walks round
+# the answers so a member being down costs one attempt rather than the whole uplink.
+#
+# One supervisor runs per uplink, reconnecting with a backoff that doubles from 5 s to a
+# minute. `limits.upstream_timeout` above is the other half: a TCP connection that is
+# open but silent is indistinguishable from a working one at the socket level, and an
+# APRS-IS feed is never silent for that long.
 #
 # [[uplink]]
 # name = "Core rotate"
-# kind = "full"
+# kind = "readonly"
 # address = "rotate.aprs.net:10152"

@@ -64,6 +64,13 @@
   {{ listeners_html|safe }}
 </section>
 
+<!--
+  The uplinks fragment is inserted without a wrapper, unlike the panels above. It renders
+  nothing at all on a server with no uplink configured, and a wrapper carrying `hx-get`
+  would leave an empty section polling for a table that will never exist.
+-->
+{{ uplinks_html|safe }}
+
 <section
   id="clients"
   class="mt-8"

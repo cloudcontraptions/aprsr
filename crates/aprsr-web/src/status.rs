@@ -19,6 +19,13 @@ pub struct Status {
     pub totals: MetricsSnapshot,
     pub listeners: Vec<ListenerInfo>,
     pub clients: Vec<ClientInfo>,
+    /// Every configured uplink, connected or not.
+    ///
+    /// Always present, like `alarms`, and always covering every uplink in the configuration
+    /// rather than only the live ones — an uplink that has never connected is precisely the
+    /// one an operator needs to see, and omitting it would make a broken link look like a
+    /// link nobody configured.
+    pub uplinks: Vec<UplinkInfo>,
     /// Stations whose position the server currently knows.
     pub stations_tracked: usize,
     /// Conditions an operator should know about, empty when there are none.
@@ -47,21 +54,36 @@ pub struct Alarm {
 /// condition goes away. That rules out anything based on a cumulative counter — the count
 /// of packets dropped for slow clients never goes down, so an alarm on it would latch on
 /// at the first blip and stay lit forever.
-fn alarms(config: &aprsr_config::Config) -> Vec<Alarm> {
+fn alarms(uplinks: &[UplinkInfo]) -> Vec<Alarm> {
     let mut alarms = Vec::new();
 
-    // An operator who configured an uplink expects to be part of the network. Until uplinks
-    // are implemented that expectation is wrong, and the status page is where they will
-    // look when their server appears to see no traffic. `check-config` says the same thing
-    // at startup, but nobody re-reads startup output a week later.
-    if !config.uplinks.is_empty() {
+    // An operator who configured an uplink expects to be part of the network. A server whose
+    // uplinks are all down looks, from the inside, exactly like a quiet network — and the
+    // status page is where they will look when their server appears to see no traffic.
+    let connected = uplinks.iter().filter(|uplink| uplink.connected).count();
+    if !uplinks.is_empty() && connected == 0 {
+        let reason = uplinks
+            .iter()
+            .find_map(|uplink| uplink.last_error.clone())
+            .unwrap_or_else(|| "no connection has been established yet".to_owned());
         alarms.push(Alarm {
             name: "no_uplink",
             message: format!(
-                "{} uplink(s) are configured but none is connected: outbound uplinks are \
-                 not implemented in this release, so this server is not exchanging traffic \
-                 with the rest of APRS-IS.",
-                config.uplinks.len()
+                "{} uplink(s) are configured and none is connected, so this server is not \
+                 exchanging traffic with the rest of APRS-IS. Most recent reason: {reason}.",
+                uplinks.len()
+            ),
+        });
+    }
+
+    // Some links up and some down is worth saying too, but it is not the same emergency —
+    // the server is still on the network, just with less redundancy than configured.
+    if connected > 0 && connected < uplinks.len() {
+        alarms.push(Alarm {
+            name: "uplink_degraded",
+            message: format!(
+                "{connected} of {} configured uplinks are connected.",
+                uplinks.len()
             ),
         });
     }
@@ -96,6 +118,34 @@ pub struct ListenerInfo {
     pub filter: Option<String>,
 }
 
+/// One configured uplink and what it is doing.
+#[derive(Debug, Clone, Serialize)]
+pub struct UplinkInfo {
+    pub name: String,
+    /// `full` or `readonly`, as configured.
+    pub kind: aprsr_config::UplinkKind,
+    /// The configured `host:port`, before DNS resolution.
+    pub address: String,
+    pub state: aprsr_server::uplink::UplinkState,
+    pub connected: bool,
+    /// The upstream server's callsign, once it has identified itself.
+    ///
+    /// This is the identity that goes into a `qAS` construct for anything arriving over this
+    /// link, so it is worth showing: an operator can check it against who they meant to peer
+    /// with, which a hostname alone does not tell them.
+    pub peer_id: Option<String>,
+    pub peer_software: Option<String>,
+    /// The address actually connected to, which differs per attempt on a DNS rotation.
+    pub peer_addr: Option<String>,
+    /// Unix seconds the current session started.
+    pub connected_at: Option<u64>,
+    pub connected_secs: Option<u64>,
+    /// Why the last attempt failed, when it did.
+    pub last_error: Option<String>,
+    pub packets_received: u64,
+    pub packets_sent: u64,
+}
+
 /// One connected client.
 #[derive(Debug, Clone, Serialize)]
 pub struct ClientInfo {
@@ -123,7 +173,10 @@ impl Status {
     #[must_use]
     pub fn capture(state: &ServerState) -> Self {
         let now = aprsr_server::now_secs();
-        let clients = state.registry.snapshot();
+        // `clients()` rather than `snapshot()`: uplinks are in the same registry so that
+        // fan-out has one implementation, but they are not clients and belong in their own
+        // section, where their state and their peer's identity can be shown.
+        let clients = state.registry.clients();
 
         // One snapshot for the whole capture: a reload part-way through would otherwise
         // produce a status page describing two different configurations at once.
@@ -146,6 +199,13 @@ impl Status {
             .map(|client| client_info(client, now))
             .collect();
 
+        let uplinks: Vec<UplinkInfo> = state
+            .uplinks
+            .all()
+            .iter()
+            .map(|uplink| uplink_info(uplink, now))
+            .collect();
+
         Self {
             server: ServerInfo {
                 // The identity actually in force, not whatever the configuration file
@@ -166,7 +226,8 @@ impl Status {
             listeners,
             clients,
             stations_tracked: state.positions.len(),
-            alarms: alarms(&config),
+            alarms: alarms(&uplinks),
+            uplinks,
         }
     }
 
@@ -174,6 +235,27 @@ impl Status {
     #[must_use]
     pub fn duplicate_share(&self) -> String {
         format::percent(self.totals.packets_duplicate, self.totals.packets_received)
+    }
+}
+
+fn uplink_info(uplink: &Arc<aprsr_server::uplink::UplinkStatus>, now: u64) -> UplinkInfo {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let connected_at = uplink.connected_at();
+    UplinkInfo {
+        name: uplink.name.to_string(),
+        kind: uplink.kind,
+        address: uplink.address.to_string(),
+        state: uplink.state(),
+        connected: uplink.is_connected(),
+        peer_id: uplink.peer_id(),
+        peer_software: uplink.peer_software(),
+        peer_addr: uplink.peer_addr().map(|addr| addr.to_string()),
+        connected_at,
+        connected_secs: connected_at.map(|at| now.saturating_sub(at)),
+        last_error: uplink.last_error(),
+        packets_received: uplink.packets_received.load(Relaxed),
+        packets_sent: uplink.packets_sent.load(Relaxed),
     }
 }
 
@@ -237,12 +319,34 @@ hidden = true
             remote: "192.0.2.5:40000".parse().expect("valid address"),
             listener: "Clients".into(),
             port_kind: PortKind::Igate,
+            connection: aprsr_server::registry::ConnectionKind::Client,
             software: Some("aprsr-test 0.1".to_owned()),
             verified: true,
             connected_at: aprsr_server::now_secs(),
             session_id: None,
             filter: FilterChain::parse(filter).expect("valid filter"),
             filter_locked: false,
+            outbox: tx,
+        });
+        rx
+    }
+
+    /// Put an uplink in the registry the way `uplink::serve` does, so the status capture
+    /// sees the same shape it would from a live link.
+    fn add_uplink(state: &ServerState, name: &str, peer: &str) -> mpsc::Receiver<Arc<str>> {
+        let (tx, rx) = mpsc::channel(8);
+        state.registry.insert(Registration {
+            callsign: peer.into(),
+            remote: "192.0.2.9:10152".parse().expect("valid address"),
+            listener: name.into(),
+            port_kind: PortKind::FullFeed,
+            connection: aprsr_server::registry::ConnectionKind::Uplink { transmit: true },
+            software: Some("aprsc 2.1.11".to_owned()),
+            verified: true,
+            connected_at: aprsr_server::now_secs(),
+            session_id: None,
+            filter: FilterChain::default(),
+            filter_locked: true,
             outbox: tx,
         });
         rx
@@ -298,6 +402,95 @@ hidden = true
     #[test]
     fn the_duplicate_share_handles_a_server_that_has_seen_nothing() {
         assert_eq!(Status::capture(&state()).duplicate_share(), "0.0%");
+    }
+
+    // --- uplinks ------------------------------------------------------------------------
+
+    const WITH_UPLINK: &str = r#"
+[server]
+id = "T2TEST"
+
+[[listen]]
+name = "Clients"
+kind = "igate"
+bind = "127.0.0.1:14580"
+
+[[uplink]]
+name = "Core rotate"
+kind = "full"
+address = "rotate.aprs.net:10152"
+"#;
+
+    fn state_with_uplink() -> Arc<ServerState> {
+        let config = Config::from_toml(WITH_UPLINK).expect("valid test configuration");
+        Arc::new(ServerState::new(Arc::new(config), None))
+    }
+
+    #[test]
+    fn a_server_with_no_uplinks_reports_an_empty_list_and_no_alarm() {
+        let status = Status::capture(&state());
+        assert!(status.uplinks.is_empty());
+        assert!(status.alarms.is_empty());
+    }
+
+    /// An uplink that has never connected must still be listed. Omitting it would make a
+    /// broken link indistinguishable from one nobody configured.
+    #[test]
+    fn a_configured_uplink_appears_before_it_has_ever_connected() {
+        let status = Status::capture(&state_with_uplink());
+        let uplink = status.uplinks.first().expect("the uplink is listed");
+        assert_eq!(uplink.name, "Core rotate");
+        assert_eq!(uplink.address, "rotate.aprs.net:10152");
+        assert!(!uplink.connected);
+        assert_eq!(uplink.peer_id, None);
+        assert_eq!(uplink.connected_at, None);
+
+        let alarm = status.alarms.first().expect("an alarm is raised");
+        assert_eq!(alarm.name, "no_uplink");
+        assert!(
+            alarm
+                .message
+                .contains("no connection has been established yet")
+        );
+    }
+
+    #[test]
+    fn an_uplink_that_is_up_clears_the_alarm_and_reports_its_peer() {
+        let state = state_with_uplink();
+        let uplink = state.uplinks.all().first().cloned().expect("one uplink");
+        uplink.mark_connected_for_test(
+            "T2FINLAND",
+            "192.0.2.1:10152".parse().expect("valid address"),
+        );
+
+        let status = Status::capture(&state);
+        let info = status.uplinks.first().expect("the uplink is listed");
+        assert!(info.connected);
+        assert_eq!(info.peer_id.as_deref(), Some("T2FINLAND"));
+        assert_eq!(info.peer_addr.as_deref(), Some("192.0.2.1:10152"));
+        assert!(info.connected_at.is_some());
+        assert!(
+            status.alarms.is_empty(),
+            "a connected uplink clears the alarm: {:?}",
+            status.alarms
+        );
+    }
+
+    /// An uplink is in the client registry so fan-out reaches it, but it is not a client and
+    /// must not be listed as one — nor counted against its port.
+    #[test]
+    fn an_uplink_is_not_listed_among_the_clients() {
+        let state = state_with_uplink();
+        let _client = add_client(&state, "N0CALL-1", "t/p");
+        let _uplink = add_uplink(&state, "Core rotate", "T2FINLAND");
+
+        let status = Status::capture(&state);
+        assert_eq!(status.clients.len(), 1);
+        assert_eq!(
+            status.clients.first().map(|c| c.callsign.as_str()),
+            Some("N0CALL-1")
+        );
+        assert_eq!(status.listeners.first().map(|l| l.clients), Some(1));
     }
 
     #[test]

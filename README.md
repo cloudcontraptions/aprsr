@@ -58,15 +58,16 @@ reported on stderr rather than dropped silently.
 |---|---|
 | **Framing** | TNC2 with the 512-byte limit enforced at the codec, before allocation |
 | **Login** | The full handshake, passcode verification, receive-only (`pass -1`) connections |
-| **q constructs** | `qAC qAX qAU qAo qAO qAS qAr qAR qAZ qAI`, the client-to-server algorithm, and the reject rules for loops and internal traffic |
+| **q constructs** | `qAC qAX qAU qAo qAO qAS qAr qAR qAZ qAI`, both halves of the algorithm, and the reject rules for loops and internal traffic |
 | **Filters** | `r/ p/ b/ o/ os/ t/ s/ d/ a/ e/ g/ u/ q/ m/ f/` — additive, negatable with `-`, bounded against hostile input |
 | **Duplicates** | A rolling 30-second window keyed on the transmission, not the path |
 | **Ports** | `fullfeed`, `igate` with per-client filters, per-port forced filters and client caps |
+| **Uplinks** | Outbound links to other servers, `full` or `readonly`, with DNS rotation, backoff and failover |
 | **Persistence** | SQLite via SeaORM: station positions, connection log, sampled counters |
-| **Web** | Server-rendered dashboard, HTMX-live, plus `status.json` and `/healthz` |
+| **Web** | Live dashboard with a station map, history charts and a searchable client table, plus `status.json`, `/metrics` and `/healthz` |
 
-Not yet: uplinks and peer links, TLS, UDP, SCTP, ACL enforcement, and byte-transparent
-handling of non-UTF-8 payloads. All of it is in [`docs/roadmap.md`](docs/roadmap.md).
+Not yet: peer links, TLS, UDP, SCTP, ACL enforcement, and byte-transparent handling of
+non-UTF-8 payloads. All of it is in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Layout
 

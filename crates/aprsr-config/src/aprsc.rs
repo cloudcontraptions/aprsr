@@ -154,10 +154,13 @@ pub fn convert(text: &str) -> Result<Conversion, ConvertError> {
                 directive: directive.clone(),
                 reason: "HTTP position upload is on the roadmap, not in this release",
             }),
+            // The uplinks themselves convert; only the choice of *source* address for an
+            // outbound connection does not. aprsr lets the operating system pick, which is
+            // right on every host that does not multi-home deliberately.
             "uplinkbind" => warnings.push(Warning::NotSupported {
                 line,
                 directive: directive.clone(),
-                reason: "uplinks are on the roadmap, not in this release",
+                reason: "aprsr does not choose a source address for outbound connections",
             }),
             "logrotate" => warnings.push(Warning::NotSupported {
                 line,
