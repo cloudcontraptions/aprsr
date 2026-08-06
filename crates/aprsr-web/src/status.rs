@@ -82,17 +82,17 @@ fn alarms(uplinks: &[UplinkInfo]) -> Vec<Alarm> {
         });
     }
 
-    // Some links up and some down is worth saying too, but it is not the same emergency —
-    // the server is still on the network, just with less redundancy than configured.
-    if connected > 0 && connected < uplinks.len() {
-        alarms.push(Alarm {
-            name: "uplink_degraded",
-            message: format!(
-                "{connected} of {} configured uplinks are connected.",
-                uplinks.len()
-            ),
-        });
-    }
+    // Deliberately *not* an alarm: several configured uplinks with one connected. That is
+    // the correct steady state, not degradation. Per
+    // <http://www.aprs-is.net/ServerDesign.aspx> a server must "never be connected to more
+    // than one server at a time", so the others are alternatives held in reserve rather than
+    // redundancy that has failed. An alarm on that condition would be lit permanently on
+    // every correctly-configured server with a failover list, which is the fastest way to
+    // train an operator to ignore the panel.
+    //
+    // The condition that *would* be wrong is more than one connected at once, which is a bug
+    // in this server rather than something an operator can act on — so it is asserted in the
+    // tests rather than reported here.
 
     alarms
 }

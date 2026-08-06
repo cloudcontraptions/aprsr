@@ -672,10 +672,16 @@ async fn a_connected_uplink_clears_the_alarm() {
     assert_eq!(json["uplinks"][0]["peer_id"], "T2FINLAND");
 }
 
-/// Some links up and some down is a different situation from all of them down: the server
-/// is still on the network, with less redundancy than configured.
+/// One of several uplinks connected is the **correct** steady state, not degradation.
+///
+/// Uplinks are a failover list: per <http://www.aprs-is.net/ServerDesign.aspx> a server must
+/// "never be connected to more than one server at a time", so the others are alternatives
+/// held in reserve. An alarm here would be lit permanently on every correctly-configured
+/// server with a fallback, which is the fastest way to train an operator to ignore the panel.
+///
+/// The failed one still reports why, because that is genuinely useful.
 #[actix_web::test]
-async fn a_partly_connected_set_of_uplinks_reads_as_degraded() {
+async fn one_of_several_uplinks_connected_is_not_an_alarm() {
     let state = state_with_uplinks(2);
     let uplinks = state.uplinks.all();
     if let Some(first) = uplinks.first() {
@@ -688,8 +694,11 @@ async fn a_partly_connected_set_of_uplinks_reads_as_degraded() {
     let body = body_of(state, "/status.json").await;
     let json: serde_json::Value = serde_json::from_str(&body).expect("status.json");
 
-    assert_eq!(json["alarms"].as_array().map(Vec::len), Some(1));
-    assert_eq!(json["alarms"][0]["name"], "uplink_degraded");
+    assert_eq!(
+        json["alarms"].as_array().map(Vec::len),
+        Some(0),
+        "a reserve uplink that is not connected is not an alarm"
+    );
     assert_eq!(json["uplinks"][1]["last_error"], "connection refused");
 }
 

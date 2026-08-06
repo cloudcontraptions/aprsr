@@ -122,13 +122,16 @@ connection. `registry` holds clients and fans out. `dispatch` decides each packe
 `supervise` is the counterpart of `accept_loop`: it owns DNS rotation, reconnection and
 backoff, so one session is about one session and a connection never decides its own fate.
 
-**Uplinks live in the client registry, peer groups will not.** An uplink is one connection
-with one identity, so putting it beside the clients means fan-out and the never-echo-to-the-
-source rule have one implementation instead of two; `ConnectionKind` is the only thing that
-distinguishes them, and it decides only what a connection is entitled to receive. A peer
-group is one UDP socket with N destinations and does not fit that shape at all, so when it
-arrives it will hang off `ServerState` rather than being forced into the registry. That
-asymmetry is deliberate.
+**Uplinks live in the client registry.** An uplink is one connection with one identity, so
+putting it beside the clients means fan-out and the never-echo-to-the-source rule have one
+implementation instead of two; `ConnectionKind` is the only thing that distinguishes them,
+and it decides only what a connection is entitled to receive.
+
+**One supervisor covers all configured uplinks, not one each.** They are a failover list:
+<http://www.aprs-is.net/ServerDesign.aspx> requires that a server "never be connected to more
+than one server at a time", and a supervisor per uplink cannot enforce that without
+coordinating with its siblings. The natural place for that coordination is not having
+siblings. Peer groups are not implemented at all — see [`peer-groups.md`](peer-groups.md).
 
 ### `aprsr-web`
 

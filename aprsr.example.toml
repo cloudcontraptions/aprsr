@@ -259,15 +259,34 @@ max_clients = 1000
 # a DNS rotation that answers with a different server each time, and aprsr walks round
 # the answers so a member being down costs one attempt rather than the whole uplink.
 #
-# One supervisor runs per uplink, reconnecting with a backoff that doubles from 5 s to a
-# minute. `limits.upstream_timeout` above is the other half: a TCP connection that is
-# open but silent is indistinguishable from a working one at the socket level, and an
-# APRS-IS feed is never silent for that long.
+# `limits.upstream_timeout` above is the other half of that: a TCP connection that is open
+# but silent is indistinguishable from a working one at the socket level, and an APRS-IS
+# feed is never silent for that long.
+#
+# SEVERAL UPLINKS ARE A FAILOVER LIST, NOT A MESH. Exactly one is connected at a time, in
+# the order written here. This is not a tuning choice — APRS-IS requires it: "Servers
+# should only connect to a single upstream server and should never be connected to more
+# than one server at a time. This is critical to preventing loops."
+#     — http://www.aprs-is.net/ServerDesign.aspx
+#
+# The first entry is tried first. If it cannot be reached the next is tried immediately,
+# with no backoff, because the whole point of an alternative is that it is probably up.
+# Only when a complete pass has failed does aprsr wait, doubling from 5 s to a minute. A
+# session that lasts long enough to count as healthy resets the list, so your first choice
+# gets tried first again once it comes back.
+#
+# aprsr does not implement peer groups — the sideways mesh between core servers. APRS-IS
+# does not describe one; see docs/peer-groups.md.
 #
 # [[uplink]]
 # name = "Core rotate"
 # kind = "readonly"
 # address = "rotate.aprs.net:10152"
+#
+# [[uplink]]
+# name = "Fallback"
+# kind = "readonly"
+# address = "t2finland.aprs2.net:14580"
 
 # An uplink over TLS. Present at all — even as an empty `tls = {}` — turns it on.
 #

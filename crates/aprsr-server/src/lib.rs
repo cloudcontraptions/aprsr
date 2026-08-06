@@ -486,17 +486,19 @@ impl Server {
             });
         }
 
-        // One supervisor per configured uplink. Each owns its own reconnection, so an
-        // upstream server being down affects nothing but its own link.
-        let mut uplink_tasks = Vec::with_capacity(self.state.uplinks.len());
-        for status in self.state.uplinks.all() {
-            uplink_tasks.push(tokio::spawn(uplink::supervise(
-                Arc::clone(status),
+        // One supervisor for *all* configured uplinks, not one each. Per
+        // <http://www.aprs-is.net/ServerDesign.aspx>, "Servers should only connect to a
+        // single upstream server and should never be connected to more than one server at a
+        // time. This is critical to preventing loops." Several `[[uplink]]` entries are a
+        // failover list, in the order the operator wrote them.
+        let uplink_task = (!self.state.uplinks.is_empty()).then(|| {
+            tokio::spawn(uplink::supervise(
+                Arc::clone(&self.state.uplinks),
                 Arc::clone(&self.state),
                 dispatcher.clone(),
                 signal.clone(),
-            )));
-        }
+            ))
+        });
 
         shutdown.await;
         tracing::info!("shutdown requested");
@@ -505,7 +507,7 @@ impl Server {
         for task in accept_tasks {
             let _ = task.await;
         }
-        for task in uplink_tasks {
+        if let Some(task) = uplink_task {
             let _ = task.await;
         }
 

@@ -601,3 +601,98 @@ async fn an_uplink_to_nothing_reports_why_and_keeps_the_server_running() {
 
     server.stop().await;
 }
+
+/// Several uplinks with A's and B's addresses filled in.
+fn downstream_with_two(first: SocketAddr, second: SocketAddr) -> String {
+    format!(
+        r#"
+[server]
+id = "T2LOWER"
+
+[limits]
+keepalive_interval = "1h"
+upstream_timeout = "30s"
+
+[[listen]]
+name = "Clients"
+kind = "igate"
+bind = "127.0.0.1:0"
+
+[[uplink]]
+name = "First"
+kind = "readonly"
+address = "{first}"
+
+[[uplink]]
+name = "Second"
+kind = "readonly"
+address = "{second}"
+"#
+    )
+}
+
+/// An uplink list is a *failover* list: when the first choice is unreachable, the next is
+/// tried, and it is tried immediately rather than after a backoff.
+///
+/// The first address here is a port nothing is listening on, so the connection is refused
+/// straight away and the supervisor has to move on by itself.
+#[tokio::test]
+async fn an_unreachable_first_choice_falls_through_to_the_next() {
+    let upstream = TestServer::start_with(UPSTREAM).await;
+
+    // A port that was bound and released, so connecting to it is refused rather than hanging.
+    let dead = {
+        let socket = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("binds");
+        socket.local_addr().expect("has an address")
+    };
+
+    let downstream =
+        TestServer::start_with(&downstream_with_two(dead, upstream.addr("Full feed"))).await;
+    downstream.uplink_connected().await;
+
+    let uplinks = downstream.state.uplinks.all();
+    let first = uplinks.first().cloned().expect("the first uplink");
+    let second = uplinks.get(1).cloned().expect("the second uplink");
+
+    assert!(!first.is_connected(), "the dead address must not connect");
+    assert!(first.last_error().is_some(), "and must say why");
+    assert!(second.is_connected(), "the second choice took over");
+    assert_eq!(second.peer_id().as_deref(), Some("T2UPPER"));
+
+    downstream.stop().await;
+    upstream.stop().await;
+}
+
+/// Two configured uplinks must not both be connected.
+///
+/// Per <http://www.aprs-is.net/ServerDesign.aspx>: "Servers should only connect to a single
+/// upstream server and should never be connected to more than one server at a time. This is
+/// critical to preventing loops."
+#[tokio::test]
+async fn only_one_uplink_is_connected_at_a_time() {
+    let a = TestServer::start_with(UPSTREAM).await;
+    let b = TestServer::start_with(UPSTREAM).await;
+
+    let downstream = TestServer::start_with(&downstream_with_two(
+        a.addr("Full feed"),
+        b.addr("Full feed"),
+    ))
+    .await;
+    wait_until("an uplink to come up", || {
+        downstream.state.uplinks.connected() >= 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert_eq!(
+        downstream.state.uplinks.connected(),
+        1,
+        "connected to more than one upstream server at once"
+    );
+
+    downstream.stop().await;
+    a.stop().await;
+    b.stop().await;
+}

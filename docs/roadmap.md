@@ -23,7 +23,9 @@ Update this file in the same change that moves an item.
   `hidden`.
 - **Uplinks** — outbound links to other servers, `full` or `readonly`, with DNS rotation,
   reconnection with backoff, and `upstream_timeout` failover. The peer's identity comes from
-  its own handshake, never from configuration.
+  its own handshake, never from configuration. Several configured uplinks are a *failover
+  list* tried in order — exactly one is connected at a time, as
+  <http://www.aprs-is.net/ServerDesign.aspx> requires.
 - **UDP** — `udpsubmit` ports, which are the only way a `qAU` construct is ever produced, and
   feed delivery to a client whose login carried `UDP <port>`.
 - **Access control** — CIDR allow and deny lists with longest-prefix matching, a callsign
@@ -59,12 +61,6 @@ Update this file in the same change that moves an item.
 
 ## Next
 
-**Peer links** — uplinks are done; peer groups are not. A peer group is a UDP mesh between
-servers at the same tier rather than a tree of outbound TCP connections, so it does not reuse
-the uplink code: one socket with N destinations, and loop prevention that cannot lean on a
-per-connection registry entry. Its framing is undocumented upstream, which makes it the least
-certain thing left on this list.
-
 **Byte-transparent payloads** — aprsr decodes lines as UTF-8 and counts anything else as
 invalid. APRS is historically byte-transparent, so a comment field with high bytes is
 currently dropped rather than relayed. Fixing this means moving the packet types off `&str`
@@ -89,6 +85,11 @@ to aprsr today, and both get relayed.
 
 - **Rewriting packets beyond the q construct.** APRS-IS relays payloads verbatim, and
   aprsr will not start editing them.
+- **Peer groups.** aprsc can join a mesh of same-tier servers; APRS-IS does not describe one,
+  and ServerDesign says the opposite — a server "should only connect to a single upstream
+  server and should never be connected to more than one server at a time". The framing is not
+  published either, and the only other route to it is reading aprsc's source, which this
+  project does not do. See [`peer-groups.md`](peer-groups.md).
 - **SCTP.** aprsc offers it; APRS-IS does not describe it. It is also untestable in this
   project's CI — GitHub's hosted runners will not load the kernel module — and Linux-only.
   The full reasoning, the crates that were evaluated, and the three things that would change

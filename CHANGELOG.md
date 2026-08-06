@@ -185,8 +185,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Uplinks appear on the dashboard and in `status.json` whether or not they are up — an
   uplink that has never connected is the one an operator needs to see — with the peer's
   identity, the address actually reached, and the reason for the last failure. The
-  `no_uplink` alarm now reflects reality and clears itself, and a new `uplink_degraded`
-  alarm covers some-up-some-down, which is a different situation from all-down.
+  `no_uplink` alarm now reflects reality and clears itself.
+
+  Several `[[uplink]]` entries are a **failover list**, tried in the order written, with
+  exactly one connected at a time — see the fix below, which is where that came from.
 - **Windows and macOS are tested, not assumed.** CI builds and runs the full suite on
   `ubuntu-latest`, `macos-latest` and `windows-latest`. Formatting and clippy stay on Linux,
   where they are not platform-dependent.
@@ -281,7 +283,49 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The administrative endpoints require `http.admin_token` and are disabled entirely when it
   is unset, because the status interface has no other authentication.
 
+### Fixed (before "Decided" — this one is a real defect)
+
+- **Several configured uplinks no longer all connect at once.** aprsr ran one supervisor per
+  `[[uplink]]` entry, so two entries meant two simultaneous upstream connections.
+  [ServerDesign](http://www.aprs-is.net/ServerDesign.aspx) forbids exactly that: "Servers
+  should only connect to a single upstream server and should never be connected to more than
+  one server at a time. **This is critical to preventing loops.**"
+
+  This is the same shape as the q-construct bug fixed earlier — it does not break this
+  server, it feeds loops into the network, and nothing downstream could attribute them to
+  aprsr. Found while researching peer groups, by reading the one paragraph in the
+  specification that covers inter-server links.
+
+  Uplinks are now a **failover list in configuration order**, driven by one supervisor for
+  the whole set. A supervisor per uplink cannot enforce "never more than one at a time"
+  without coordinating with its siblings, and the natural place for that coordination is not
+  having siblings.
+
+  Failover inside a pass is immediate — the whole point of an alternative is that it is
+  probably up — and the backoff applies only once a complete pass has failed, so it counts
+  rounds of total outage rather than individual attempts. A healthy session resets the list
+  so the operator's first choice is tried first again.
+
+  A `uplink_degraded` alarm written earlier in this same cycle went with it: under the
+  correct behaviour "one of two connected" is the steady state, not degradation, and an
+  alarm lit permanently on every correctly-configured server is the fastest way to train an
+  operator to ignore the panel.
+
 ### Decided
+
+- **Peer groups are not planned**, and `docs/peer-groups.md` records why. APRS-IS does not
+  describe them: the specification index lists nine documents and none covers a peer
+  protocol, while ServerDesign says the opposite — one upstream connection, never more.
+
+  The framing is not published either. The nearest public description is a wiki page of
+  "collected server requirements" sketching a `@xy@` prefix tag, which reads as a proposal
+  and which recommends *against* the UDP transport this work had assumed. Being compatible
+  with the servers that actually run peer groups would need their real wire format, and the
+  only routes to that are reading aprsc's source — which this project does not do — or
+  observing a mesh there is no way to join.
+
+  What aprsr does instead is the fix above: a documented failover list, which is the
+  redundancy an ordinary sysop actually wants.
 
 - **SCTP is not planned**, and `docs/sctp.md` records why in full. aprsc offers it; the
   APRS-IS specification does not describe it — [Connecting](http://www.aprs-is.net/Connecting.aspx)

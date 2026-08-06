@@ -58,7 +58,9 @@ pub(crate) fn check_config(path: &Path) -> Result<()> {
 
     if !config.uplinks.is_empty() {
         println!();
-        println!("  uplinks:");
+        // The order is the failover order, so say so: "why is it always using the second
+        // one" is otherwise a question the output cannot answer.
+        println!("  uplinks, in the order they will be tried:");
         for uplink in &config.uplinks {
             let tls = match uplink.tls_server_name() {
                 Some(name) => format!("  TLS, verifying {name}"),

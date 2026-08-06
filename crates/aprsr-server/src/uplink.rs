@@ -495,12 +495,45 @@ impl std::fmt::Display for SessionEnd {
     }
 }
 
-/// Keep one uplink connected for the life of the server.
+/// Which uplink to try on a given attempt, and how long to wait first.
 ///
-/// The counterpart of `accept_loop`: it owns reconnection, rotation and backoff so that
-/// [`serve`] can be about one session and nothing else.
+/// Configured uplinks are a **failover list, not a mesh**: one connection at a time, tried in
+/// the order the operator wrote. Per <http://www.aprs-is.net/ServerDesign.aspx>, "Servers
+/// should only connect to a single upstream server and should never be connected to more than
+/// one server at a time. This is critical to preventing loops."
+///
+/// The delay is what makes failover fast and a total outage patient. Within one pass the list
+/// is walked back to back with no wait at all — the whole reason to configure alternatives is
+/// that the next one is probably up. The backoff applies only when a pass has been completed
+/// and the first entry comes round again, so it counts *rounds of total failure* rather than
+/// individual attempts.
+///
+/// Returns `None` when nothing is configured.
+#[must_use]
+pub fn attempt_plan(count: usize, attempt: u64) -> Option<(usize, Duration)> {
+    let count = u64::try_from(count).ok().filter(|n| *n > 0)?;
+    let index = attempt % count;
+    let round = attempt / count;
+    // `backoff(0)` is zero, so the very first attempt of all is immediate.
+    let delay = if index == 0 {
+        backoff(round)
+    } else {
+        Duration::ZERO
+    };
+    Some((usize::try_from(index).ok()?, delay))
+}
+
+/// Keep exactly one uplink connected for the life of the server.
+///
+/// The counterpart of `accept_loop`: it owns failover, reconnection, DNS rotation and backoff
+/// so that [`serve`] can be about one session and nothing else.
+///
+/// One supervisor for the whole list rather than one per uplink, because the specification's
+/// rule is about the *server*, not about any single link: a supervisor per uplink cannot
+/// enforce "never more than one at a time" without coordinating with its siblings, and the
+/// natural place for that coordination is simply not having siblings.
 pub async fn supervise(
-    status: Arc<UplinkStatus>,
+    uplinks: Arc<UplinkRegistry>,
     state: Arc<ServerState>,
     dispatcher: Dispatcher,
     mut shutdown: Shutdown,
@@ -512,14 +545,18 @@ pub async fn supervise(
             break;
         }
 
-        let failures = status.failures.load(Ordering::Relaxed);
-        let delay = backoff(failures);
+        let Some((index, delay)) = attempt_plan(uplinks.len(), attempt) else {
+            return; // nothing configured; this server is standalone
+        };
+        let Some(status) = uplinks.all().get(index).map(Arc::clone) else {
+            break;
+        };
+
         if !delay.is_zero() {
             tracing::info!(
-                uplink = %status.name,
-                failures,
+                round = attempt / uplinks.len() as u64,
                 delay_secs = delay.as_secs(),
-                "waiting before reconnecting"
+                "every uplink failed; waiting before starting again"
             );
             tokio::select! {
                 () = tokio::time::sleep(delay) => {}
@@ -530,15 +567,17 @@ pub async fn supervise(
         status.set_state(UplinkState::Connecting);
         let started = tokio::time::Instant::now();
         let outcome = connect_once(&status, &state, &dispatcher, shutdown.clone(), attempt).await;
-        attempt = attempt.wrapping_add(1);
 
         match outcome {
             SessionEnd::Shutdown => break,
             other => {
                 let elapsed = started.elapsed();
                 if was_healthy(elapsed) {
-                    // The link worked. Whatever ended it, the next attempt should be
-                    // immediate rather than inheriting a backoff earned hours ago.
+                    // The link worked. Start again from the top of the list rather than
+                    // carrying on down it: the operator's first choice is their first choice,
+                    // and a link that ran for an hour has earned another try before its
+                    // alternatives do.
+                    attempt = 0;
                     status.failures.store(0, Ordering::Relaxed);
                     status.set_state(UplinkState::Idle);
                     status.connected_at.store(0, Ordering::Relaxed);
@@ -549,21 +588,24 @@ pub async fn supervise(
                         "uplink session ended"
                     );
                 } else {
+                    attempt = attempt.wrapping_add(1);
                     let failures = status.record_failure(&other.to_string());
                     tracing::warn!(
                         uplink = %status.name,
                         failures,
                         reason = %other,
-                        "uplink attempt failed"
+                        "uplink attempt failed, trying the next one"
                     );
                 }
             }
         }
     }
 
-    status.set_state(UplinkState::Idle);
-    status.connected_at.store(0, Ordering::Relaxed);
-    tracing::debug!(uplink = %status.name, "uplink supervisor finished");
+    for status in uplinks.all() {
+        status.set_state(UplinkState::Idle);
+        status.connected_at.store(0, Ordering::Relaxed);
+    }
+    tracing::debug!("uplink supervisor finished");
 }
 
 /// Resolve, connect and run one session.
@@ -1052,6 +1094,59 @@ mod tests {
                 "192.0.2.1"
             ]
         );
+    }
+
+    // --- the failover list ---------------------------------------------------------------
+
+    /// Several uplinks are tried in order, back to back, with no delay inside a pass — the
+    /// whole reason to configure alternatives is that the next one is probably up.
+    #[test]
+    fn a_pass_walks_the_list_with_no_delay() {
+        let plan: Vec<_> = (0..3).filter_map(|n| attempt_plan(3, n)).collect();
+        assert_eq!(
+            plan,
+            [
+                (0, Duration::ZERO),
+                (1, Duration::ZERO),
+                (2, Duration::ZERO)
+            ]
+        );
+    }
+
+    /// The backoff counts rounds of *total* failure, not individual attempts. Coming back to
+    /// the first entry is what says every alternative has just been tried and failed.
+    #[rstest]
+    #[case(3, 0, 0, 0)] // the very first attempt is immediate
+    #[case(3, 3, 0, 5)] // back to the top: one full pass has failed
+    #[case(3, 4, 1, 0)] // and the rest of that pass is immediate again
+    #[case(3, 6, 0, 10)] // two passes
+    #[case(3, 9, 0, 20)]
+    #[case(1, 1, 0, 5)] // with one uplink, every attempt is a round
+    #[case(1, 2, 0, 10)]
+    fn the_backoff_applies_once_a_pass_is_complete(
+        #[case] count: usize,
+        #[case] attempt: u64,
+        #[case] expected_index: usize,
+        #[case] expected_secs: u64,
+    ) {
+        assert_eq!(
+            attempt_plan(count, attempt),
+            Some((expected_index, Duration::from_secs(expected_secs)))
+        );
+    }
+
+    #[test]
+    fn a_server_with_no_uplinks_has_nothing_to_plan() {
+        assert_eq!(attempt_plan(0, 0), None);
+        assert_eq!(attempt_plan(0, 99), None);
+    }
+
+    /// The counter is only bounded by uptime, so the arithmetic has to survive its top end.
+    #[test]
+    fn the_plan_survives_a_very_long_uptime() {
+        let plan = attempt_plan(3, u64::MAX);
+        assert!(plan.is_some(), "wrapped or overflowed");
+        assert!(matches!(plan, Some((index, _)) if index < 3));
     }
 
     #[test]

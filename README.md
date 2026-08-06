@@ -12,8 +12,8 @@ suppresses duplicate transmissions, and delivers each client exactly the slice o
 its filters ask for.
 
 > **Early days.** The protocol core is implemented and covered by tests, the server runs,
-> and it uplinks to the rest of APRS-IS over plain TCP or TLS. Peer groups are not in yet —
-> see [`docs/roadmap.md`](docs/roadmap.md) for exactly what works today.
+> and it uplinks to the rest of APRS-IS over plain TCP or TLS. See
+> [`docs/roadmap.md`](docs/roadmap.md) for exactly what works today.
 
 ## Getting started
 
@@ -79,8 +79,9 @@ reported on stderr rather than dropped silently.
 | **Persistence** | SQLite via SeaORM: station positions, connection log, sampled counters |
 | **Web** | Live dashboard with a station map, history charts and a searchable client table, plus `status.json`, `/metrics` and `/healthz` |
 
-Not yet: peer links, and byte-transparent handling of non-UTF-8 payloads. All of it is in
-[`docs/roadmap.md`](docs/roadmap.md). SCTP is **not planned** — the reasoning is in
+Not yet: byte-transparent handling of non-UTF-8 payloads — see
+[`docs/roadmap.md`](docs/roadmap.md). Peer groups and SCTP are **not planned**, and the
+reasoning is written down in [`docs/peer-groups.md`](docs/peer-groups.md) and
 [`docs/sctp.md`](docs/sctp.md).
 
 ## Layout
