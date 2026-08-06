@@ -11,9 +11,9 @@ network — it accepts client and IGate connections, applies the q construct alg
 suppresses duplicate transmissions, and delivers each client exactly the slice of the feed
 its filters ask for.
 
-> **Early days.** The protocol core is implemented and covered by tests, and the server
-> runs. Uplink and peer connections, TLS and UDP are not in yet — see
-> [`docs/roadmap.md`](docs/roadmap.md) for exactly what works today.
+> **Early days.** The protocol core is implemented and covered by tests, the server runs,
+> and it uplinks to the rest of APRS-IS. Peer groups, TLS and ACL enforcement are not in yet
+> — see [`docs/roadmap.md`](docs/roadmap.md) for exactly what works today.
 
 ## Getting started
 
@@ -63,10 +63,11 @@ reported on stderr rather than dropped silently.
 | **Duplicates** | A rolling 30-second window keyed on the transmission, not the path |
 | **Ports** | `fullfeed`, `igate` with per-client filters, per-port forced filters and client caps |
 | **Uplinks** | Outbound links to other servers, `full` or `readonly`, with DNS rotation, backoff and failover |
+| **UDP** | `udpsubmit` ingest, and feed delivery to clients that ask for it with `UDP <port>` |
 | **Persistence** | SQLite via SeaORM: station positions, connection log, sampled counters |
 | **Web** | Live dashboard with a station map, history charts and a searchable client table, plus `status.json`, `/metrics` and `/healthz` |
 
-Not yet: peer links, TLS, UDP, SCTP, ACL enforcement, and byte-transparent handling of
+Not yet: peer links, TLS, SCTP, ACL enforcement, and byte-transparent handling of
 non-UTF-8 payloads. All of it is in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Layout

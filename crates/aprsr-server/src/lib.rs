@@ -24,6 +24,7 @@ pub mod listener;
 pub mod metrics;
 pub mod registry;
 pub mod reload;
+pub mod udp;
 pub mod uplink;
 
 use std::net::SocketAddr;
@@ -126,6 +127,15 @@ pub struct ServerState {
     /// never connected still appears on the status page saying why — which is the case an
     /// operator most needs to see.
     pub uplinks: Arc<uplink::UplinkRegistry>,
+    /// The socket datagrams are sent *from* for clients that asked for a UDP feed.
+    ///
+    /// One socket for the whole server rather than one per client: a datagram carries its
+    /// destination, so there is nothing per-client to keep, and a server with a thousand UDP
+    /// clients would otherwise hold a thousand descriptors for no reason.
+    ///
+    /// `None` when no UDP listener is configured, in which case a client asking for UDP
+    /// delivery gets the TCP feed and a log line saying so.
+    pub udp_out: Option<Arc<tokio::net::UdpSocket>>,
     pub positions: Arc<PositionCache>,
     pub store: Option<Store>,
     /// Unix seconds when the server started.
@@ -151,6 +161,7 @@ impl ServerState {
         Self {
             server_id: Arc::from(config.server.id.as_str()),
             uplinks: Arc::new(uplink::UplinkRegistry::from_config(&config.uplinks)),
+            udp_out: None,
             config: std::sync::RwLock::new(config),
             config_path: None,
             metrics: Arc::new(Metrics::new()),
@@ -285,6 +296,12 @@ impl Server {
             state = state.with_config_path(path);
         }
 
+        // A client that asks for its feed over UDP needs a socket to receive it from, and
+        // the operator only implicitly consented to outbound UDP by configuring a UDP
+        // listener at all. Bound on an ephemeral port of the same family, so a datagram
+        // leaves from an address the client can reach.
+        state.udp_out = outbound_udp_socket(&listeners);
+
         if let Some(store) = state.store.as_ref() {
             match store.load_positions().await {
                 Ok(cache) => {
@@ -340,12 +357,23 @@ impl Server {
 
         let mut accept_tasks = Vec::with_capacity(self.listeners.len());
         for bound in self.listeners {
-            accept_tasks.push(tokio::spawn(accept_loop(
-                bound,
-                Arc::clone(&self.state),
-                dispatcher.clone(),
-                signal.clone(),
-            )));
+            let context = bound.context;
+            let state = Arc::clone(&self.state);
+            let dispatcher = dispatcher.clone();
+            let signal = signal.clone();
+
+            accept_tasks.push(match bound.socket {
+                listener::BoundSocket::Tcp(socket) => {
+                    tokio::spawn(accept_loop(socket, context, state, dispatcher, signal))
+                }
+                listener::BoundSocket::Udp(socket) => tokio::spawn(udp::submit_loop(
+                    socket,
+                    Arc::clone(&context.name),
+                    state,
+                    dispatcher,
+                    signal,
+                )),
+            });
         }
 
         // One supervisor per configured uplink. Each owns its own reconnection, so an
@@ -387,18 +415,52 @@ impl Server {
     }
 }
 
+/// Bind the socket UDP feeds are sent from, if this server serves UDP at all.
+///
+/// Gated on a UDP listener being configured. Sending datagrams is not something to start
+/// doing because a client asked: an operator who configured no UDP port has not consented to
+/// outbound UDP traffic, and on a firewalled host those datagrams would be dropped anyway
+/// while the client waited for a feed that never came. With a UDP listener present the
+/// consent is explicit, and a client asking for delivery gets it.
+///
+/// The family follows the first UDP listener, so the source address is one the client can
+/// route back to. A failure here is not fatal — the clients that asked for UDP get the TCP
+/// feed instead, which is a degradation rather than an outage.
+fn outbound_udp_socket(listeners: &[BoundListener]) -> Option<Arc<tokio::net::UdpSocket>> {
+    let serves_udp = listeners
+        .iter()
+        .find(|bound| matches!(bound.socket, listener::BoundSocket::Udp(_)))?;
+
+    let bind: SocketAddr = if serves_udp.local_addr.is_ipv6() {
+        ([0u16; 8], 0).into()
+    } else {
+        ([0u8, 0, 0, 0], 0).into()
+    };
+
+    match udp::bind_udp(bind, false) {
+        Ok(socket) => Some(Arc::new(socket)),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "could not open a socket for UDP feed delivery; \
+                 clients asking for one will get the TCP feed"
+            );
+            None
+        }
+    }
+}
+
 /// Accept connections on one listener until shutdown.
 async fn accept_loop(
-    bound: BoundListener,
+    socket: tokio::net::TcpListener,
+    context: Arc<ListenerContext>,
     state: Arc<ServerState>,
     dispatcher: Dispatcher,
     mut shutdown: Shutdown,
 ) {
-    let context: Arc<ListenerContext> = bound.context;
-
     loop {
         let accepted = tokio::select! {
-            accepted = bound.socket.accept() => accepted,
+            accepted = socket.accept() => accepted,
             () = shutdown.wait() => break,
         };
 

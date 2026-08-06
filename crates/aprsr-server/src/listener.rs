@@ -50,14 +50,26 @@ impl ListenerContext {
     }
 }
 
-/// A bound TCP socket together with the port it serves.
+/// A bound socket together with the port it serves.
 #[derive(Debug)]
 pub struct BoundListener {
     pub context: Arc<ListenerContext>,
-    pub socket: TcpListener,
+    pub socket: BoundSocket,
     /// The address actually bound, which differs from the configured one when port 0 was
     /// requested.
     pub local_addr: SocketAddr,
+}
+
+/// The socket behind a listener, whichever transport it uses.
+///
+/// The two are genuinely different shapes — one accepts connections, the other receives
+/// datagrams — so they are an enum rather than a trait. There are exactly two, they will
+/// never be extended by a caller, and a `match` at the one place that starts a task is
+/// clearer than a dyn dispatch that hides which is which.
+#[derive(Debug)]
+pub enum BoundSocket {
+    Tcp(TcpListener),
+    Udp(tokio::net::UdpSocket),
 }
 
 /// How many pending connections the kernel may queue before it starts refusing them.
@@ -101,45 +113,44 @@ fn bind_tcp(address: SocketAddr, dual_stack: bool) -> std::io::Result<TcpListene
     TcpListener::from_std(std::net::TcpListener::from(socket))
 }
 
-/// Bind every configured TCP listener.
+/// Bind every configured listener, TCP or UDP.
 ///
 /// Synchronous: binding a socket does not block, and doing it before the runtime starts
 /// accepting means a configuration error surfaces at startup rather than afterwards.
-///
-/// UDP listeners are parsed and validated but not yet served; they are reported so the
-/// operator can see that the configuration was understood.
 pub fn bind_all(config: &Config) -> Result<Vec<BoundListener>, ServerError> {
     let mut bound = Vec::with_capacity(config.listeners.len());
+    let mut has_tcp = false;
 
     for listener in &config.listeners {
         let context = Arc::new(ListenerContext::from_config(listener)?);
+        let dual_stack = listener.wants_dual_stack();
 
-        if listener.protocol == Protocol::Udp {
-            tracing::warn!(
-                listener = %listener.name,
-                "UDP listeners are on the roadmap and are not served in this release"
-            );
-            continue;
-        }
-
-        let socket = bind_tcp(listener.bind, listener.wants_dual_stack()).map_err(|source| {
-            ServerError::Bind {
-                listener: listener.name.clone(),
-                address: listener.bind,
-                source,
-            }
-        })?;
-        let local_addr = socket.local_addr().map_err(|source| ServerError::Bind {
+        let failed = |source| ServerError::Bind {
             listener: listener.name.clone(),
             address: listener.bind,
             source,
-        })?;
+        };
+
+        let (socket, local_addr) = match listener.protocol {
+            Protocol::Tcp => {
+                has_tcp = true;
+                let socket = bind_tcp(listener.bind, dual_stack).map_err(failed)?;
+                let local_addr = socket.local_addr().map_err(failed)?;
+                (BoundSocket::Tcp(socket), local_addr)
+            }
+            Protocol::Udp => {
+                let socket = crate::udp::bind_udp(listener.bind, dual_stack).map_err(failed)?;
+                let local_addr = socket.local_addr().map_err(failed)?;
+                (BoundSocket::Udp(socket), local_addr)
+            }
+        };
 
         tracing::info!(
             listener = %listener.name,
             kind = ?listener.kind,
+            protocol = ?listener.protocol,
             %local_addr,
-            dual_stack = listener.wants_dual_stack(),
+            dual_stack,
             "listening"
         );
 
@@ -150,7 +161,9 @@ pub fn bind_all(config: &Config) -> Result<Vec<BoundListener>, ServerError> {
         });
     }
 
-    if bound.is_empty() {
+    // A server with only UDP ports can be submitted to but cannot serve a feed to anybody,
+    // which is almost certainly a configuration mistake rather than an intent.
+    if !has_tcp {
         return Err(ServerError::NoTcpListeners);
     }
 
@@ -275,7 +288,7 @@ bind = "127.0.0.1:0"
     }
 
     #[tokio::test]
-    async fn a_udp_listener_is_accepted_but_not_served() {
+    async fn a_udp_listener_binds_a_datagram_socket() {
         let config = config(
             r#"
 [[listen]]
@@ -292,11 +305,16 @@ bind = "127.0.0.1:0"
         );
 
         let bound = bind_all(&config).expect("binds");
-        assert_eq!(bound.len(), 1, "only the TCP listener is served");
-        assert_eq!(
-            bound.first().map(|l| l.context.name.as_ref()),
-            Some("Clients")
-        );
+        assert_eq!(bound.len(), 2, "both listeners are served");
+
+        let tcp = bound.first().expect("the TCP listener");
+        assert_eq!(tcp.context.name.as_ref(), "Clients");
+        assert!(matches!(tcp.socket, BoundSocket::Tcp(_)));
+
+        let udp = bound.get(1).expect("the UDP listener");
+        assert_eq!(udp.context.name.as_ref(), "UDP submit");
+        assert!(matches!(udp.socket, BoundSocket::Udp(_)));
+        assert_ne!(udp.local_addr.port(), 0, "the OS assigned a real port");
     }
 
     #[tokio::test]

@@ -62,6 +62,7 @@ which part of aprsr, so a reader familiar with one can navigate the other.
 | `clientlist.c` | `aprsr-server/src/registry.rs` | The client registry |
 | `incoming.c`, `outgoing.c` | `aprsr-server/src/dispatch.rs`, `registry.rs` | Merged: one ingest path, one fan-out |
 | `accept.c`, `worker.c` | `aprsr-server/src/listener.rs`, `client.rs` | tokio tasks replace the worker-thread pool |
+| `netlib.c` (UDP paths) | `aprsr-server/src/udp.rs` | `udpsubmit` ingest and `UDP <port>` feed delivery |
 | `http.c`, `status.c` | `aprsr-web/` | Actix Web and Askama replace the embedded HTTP server |
 | `counterdata.c` | `aprsr-server/src/metrics.rs`, `aprsr-store` (`counter_sample`) | Live atomics, sampled to the database |
 | `acl.c` | `aprsr-store` (`acl_entry`) | Table exists; enforcement is on the roadmap |

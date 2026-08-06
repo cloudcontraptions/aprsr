@@ -143,6 +143,23 @@ max_clients = 1000
 # bind = "[::]:20350"
 # filter = "m/350"
 
+# Packet submission over UDP. A datagram carries a login line and one or more packets;
+# there is no connection and no session, which is how a station that beacons every few
+# minutes avoids holding a socket open all day. Each datagram is verified on its own,
+# because there is no session to verify once — and a source address is not a credential.
+#
+# This is also the only port kind that produces a qAU construct.
+#
+# Configuring one has a second effect: it is what lets a TCP client ask for its *feed*
+# over UDP with "UDP <port>" in its login line. Without a UDP listener aprsr sends no
+# datagrams at all, and such a client quietly gets the ordinary TCP feed instead.
+#
+# [[listen]]
+# name = "UDP submit"
+# kind = "udpsubmit"
+# protocol = "udp"
+# bind = "[::]:8080"
+
 # --- Uplinks ------------------------------------------------------------------------
 #
 # Outbound connections to other APRS-IS servers. Without at least one, aprsr is a

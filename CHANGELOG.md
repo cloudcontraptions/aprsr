@@ -9,6 +9,29 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **UDP, both directions.** A `udpsubmit` port accepts datagrams carrying a login line and
+  one or more packets, with no connection and no session — which is how a weather station
+  that beacons every five minutes avoids holding a socket open for a day. It is also the only
+  path that produces a `qAU` construct, so until now aprsr had one it could never emit.
+
+  Every datagram is authenticated on its own: there is no session to authenticate once, and a
+  source address is not a credential. Framing is deliberately not the stream rules — a
+  datagram has exactly one boundary, so an oversized line fails the *whole* datagram rather
+  than being skipped, because a sender whose framing is wrong is not to be trusted about the
+  packets either side of it.
+
+  In the other direction, a login carrying `UDP <port>` moves that client's feed to
+  datagrams while its TCP connection stays up for submissions, filter commands and
+  keepalives. One datagram per packet, never coalesced: a datagram arrives whole or not at
+  all, and packing several together makes one loss lose all of them. A server with no UDP
+  listener has not consented to sending datagrams, so a client asking there gets the TCP feed
+  and a log line saying why.
+
+  Windows reports an ICMP port-unreachable from a *previous* send as `WSAECONNRESET` on the
+  *receiving* socket — a connection reset on a protocol with no connections. That would
+  otherwise take a listener down the first time a UDP client went away, which is a thing
+  clients do constantly, so it and its Linux and BSD equivalents are handled and the loop
+  carries on.
 - **Uplinks.** aprsr connects out to other APRS-IS servers, so a server with an `[[uplink]]`
   section is a participant in the network rather than a standalone relay between its own
   clients. `readonly` takes the feed and sends nothing; `full` is bidirectional and needs a
@@ -222,7 +245,7 @@ aprsr is an independent implementation and contains no source code from
 [aprsc](https://github.com/hessu/aprsc), whose architecture it follows with thanks. See
 [`NOTICE`](NOTICE) and [`docs/attribution.md`](docs/attribution.md).
 
-Peer links, TLS, UDP and ACL enforcement are not in this release; see
+Peer links, TLS and ACL enforcement are not in this release; see
 [`docs/roadmap.md`](docs/roadmap.md).
 
 [Unreleased]: https://github.com/cloudcontraptions/aprsr/commits/main

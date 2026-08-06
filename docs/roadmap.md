@@ -24,6 +24,8 @@ Update this file in the same change that moves an item.
 - **Uplinks** — outbound links to other servers, `full` or `readonly`, with DNS rotation,
   reconnection with backoff, and `upstream_timeout` failover. The peer's identity comes from
   its own handshake, never from configuration.
+- **UDP** — `udpsubmit` ports, which are the only way a `qAU` construct is ever produced, and
+  feed delivery to a client whose login carried `UDP <port>`.
 - **Dispatch** — single ingest task, bounded per-client queues, slow clients drop packets
   rather than stalling the server.
 - **Persistence** — SQLite via SeaORM: station positions (loaded at start, saved every
@@ -50,10 +52,6 @@ servers at the same tier rather than a tree of outbound TCP connections, so it d
 the uplink code: one socket with N destinations, and loop prevention that cannot lean on a
 per-connection registry entry. Its framing is undocumented upstream, which makes it the least
 certain thing left on this list.
-
-**UDP** — `udpsubmit` ports and UDP delivery to clients that asked for it in their login
-(`UDP <port>`). The configuration is parsed; `bind_all` logs that UDP listeners are not
-served and skips them.
 
 **Byte-transparent payloads** — aprsr decodes lines as UTF-8 and counts anything else as
 invalid. APRS is historically byte-transparent, so a comment field with high bytes is

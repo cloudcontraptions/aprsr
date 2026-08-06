@@ -138,10 +138,20 @@ pub async fn serve(
     );
 
     // 4. The feed, in one task, and the client's submissions in this one.
+    //
+    //    A login carrying `UDP <port>` asks for the feed over UDP, per
+    //    <http://www.aprs-is.net/Connecting.aspx>. The TCP connection stays exactly as it
+    //    is — submissions, filter commands and keepalives all still travel over it — and
+    //    only the direction carrying packets moves.
+    let udp_feed = udp_feed_for(&login, peer, &state);
+    if let Some(feed) = &udp_feed {
+        tracing::info!(%peer, callsign = %callsign, target = %feed.target(), "delivering the feed over UDP");
+    }
     let mut writer_task = tokio::spawn(write_feed(
         writer,
         outbox_rx,
         Arc::clone(&state),
+        udp_feed,
         shutdown.clone(),
     ));
 
@@ -320,11 +330,39 @@ async fn open_session_row(
     }
 }
 
+/// Build the UDP feed a login asked for, if it asked for one and the server can provide it.
+///
+/// Returns `None` when the login carried no `UDP` keyword — the overwhelmingly common case —
+/// and also when the server has no UDP socket to send from. Falling back to the TCP feed is
+/// right: the client still gets its packets, just over the transport it did not choose,
+/// which is far better than a connection that silently delivers nothing.
+fn udp_feed_for(
+    login: &LoginRequest,
+    peer: std::net::SocketAddr,
+    state: &ServerState,
+) -> Option<crate::udp::UdpFeed> {
+    let port = login.udp_port?;
+    let Some(socket) = state.udp_out.as_ref() else {
+        tracing::info!(
+            %peer,
+            port,
+            "a client asked for UDP delivery but this server has no UDP socket; \
+             using the TCP feed instead"
+        );
+        return None;
+    };
+    Some(crate::udp::UdpFeed::new(Arc::clone(socket), peer, port))
+}
+
 /// Drain the client's outgoing queue, sending keepalive comment lines while it is idle.
+///
+/// When `udp_feed` is set the packets go out as datagrams and the TCP connection carries
+/// only the keepalives — which is what makes a stalled UDP client still detectable.
 async fn write_feed(
     mut writer: BufWriter<tokio::net::tcp::OwnedWriteHalf>,
     mut outbox: mpsc::Receiver<Arc<str>>,
     state: Arc<ServerState>,
+    udp_feed: Option<crate::udp::UdpFeed>,
     mut shutdown: Shutdown,
 ) {
     let period = state.config().limits.keepalive_interval.as_duration();
@@ -337,6 +375,18 @@ async fn write_feed(
         tokio::select! {
             line = outbox.recv() => {
                 let Some(line) = line else { break };
+
+                if let Some(feed) = &udp_feed {
+                    // One datagram per packet. Coalescing them the way the TCP path does
+                    // would be wrong: a datagram is delivered whole or not at all, so
+                    // packing several together makes one lost datagram lose all of them.
+                    feed.send(&line).await;
+                    while let Ok(next) = outbox.try_recv() {
+                        feed.send(&next).await;
+                    }
+                    continue;
+                }
+
                 if write_line(&mut writer, &line).await.is_err() {
                     break;
                 }
