@@ -36,6 +36,10 @@ pub struct Metrics {
     pub clients_total: AtomicU64,
     /// Logins refused for a bad passcode or a malformed login line.
     pub logins_rejected: AtomicU64,
+    /// Connections refused by an access rule — a blocked address or a blocked callsign.
+    pub connections_refused: AtomicU64,
+    /// Packets dropped because the submitting client was over its rate.
+    pub packets_rate_limited: AtomicU64,
 }
 
 impl Metrics {
@@ -74,6 +78,8 @@ impl Metrics {
             clients_connected: get(&self.clients_connected),
             clients_total: get(&self.clients_total),
             logins_rejected: get(&self.logins_rejected),
+            connections_refused: get(&self.connections_refused),
+            packets_rate_limited: get(&self.packets_rate_limited),
         }
     }
 }
@@ -94,6 +100,8 @@ pub struct MetricsSnapshot {
     pub clients_connected: u64,
     pub clients_total: u64,
     pub logins_rejected: u64,
+    pub connections_refused: u64,
+    pub packets_rate_limited: u64,
 }
 
 /// Per-connection counters, kept alongside the client's registry entry.

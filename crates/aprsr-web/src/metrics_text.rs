@@ -49,9 +49,29 @@ struct Metric {
 /// `uptime` is passed rather than read so this stays a pure function of its inputs.
 #[must_use]
 pub fn render(totals: &MetricsSnapshot, uptime_secs: u64, stations_tracked: usize) -> String {
-    // Names follow the convention: a `aprsr_` prefix, a unit suffix, and no units in the
-    // middle. `_total` marks a counter, per the format's own naming rules.
-    let metrics = [
+    let metrics: Vec<Metric> = packet_metrics(totals)
+        .into_iter()
+        .chain(connection_metrics(totals, uptime_secs, stations_tracked))
+        .collect();
+
+    let mut out = String::with_capacity(metrics.len() * 128);
+    for metric in &metrics {
+        let _ = writeln!(out, "# HELP {} {}", metric.name, metric.help);
+        let _ = writeln!(out, "# TYPE {} {}", metric.name, metric.kind.as_str());
+        let _ = writeln!(out, "{} {}", metric.name, metric.value);
+    }
+    out
+}
+
+/// Everything counted on the packet path.
+///
+/// Split from [`connection_metrics`] because the list is long enough that one function
+/// holding all of it is harder to scan than two, not because the two differ in any other way.
+///
+/// Names follow the convention: an `aprsr_` prefix, a unit suffix, and no units in the
+/// middle. `_total` marks a counter, per the format's own naming rules.
+fn packet_metrics(totals: &MetricsSnapshot) -> [Metric; 10] {
+    [
         Metric {
             name: "aprsr_packets_received_total",
             kind: Kind::Counter,
@@ -112,11 +132,33 @@ pub fn render(totals: &MetricsSnapshot, uptime_secs: u64, stations_tracked: usiz
             help: "Bytes written to clients",
             value: totals.bytes_sent,
         },
+    ]
+}
+
+/// Everything about connections, access rules and the server itself.
+fn connection_metrics(
+    totals: &MetricsSnapshot,
+    uptime_secs: u64,
+    stations_tracked: usize,
+) -> [Metric; 7] {
+    [
         Metric {
             name: "aprsr_logins_rejected_total",
             kind: Kind::Counter,
             help: "Logins that did not produce a verified session",
             value: totals.logins_rejected,
+        },
+        Metric {
+            name: "aprsr_connections_refused_total",
+            kind: Kind::Counter,
+            help: "Connections refused by an access rule",
+            value: totals.connections_refused,
+        },
+        Metric {
+            name: "aprsr_packets_rate_limited_total",
+            kind: Kind::Counter,
+            help: "Packets dropped because the client was over its submission rate",
+            value: totals.packets_rate_limited,
         },
         Metric {
             name: "aprsr_connections_total",
@@ -142,15 +184,7 @@ pub fn render(totals: &MetricsSnapshot, uptime_secs: u64, stations_tracked: usiz
             help: "Seconds since the server started",
             value: uptime_secs,
         },
-    ];
-
-    let mut out = String::with_capacity(metrics.len() * 128);
-    for metric in &metrics {
-        let _ = writeln!(out, "# HELP {} {}", metric.name, metric.help);
-        let _ = writeln!(out, "# TYPE {} {}", metric.name, metric.kind.as_str());
-        let _ = writeln!(out, "{} {}", metric.name, metric.value);
-    }
-    out
+    ]
 }
 
 /// The content type Prometheus expects.
@@ -175,6 +209,8 @@ mod tests {
             clients_connected: 7,
             clients_total: 42,
             logins_rejected: 6,
+            connections_refused: 3,
+            packets_rate_limited: 9,
         }
     }
 

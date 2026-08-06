@@ -18,6 +18,7 @@
 //!
 //! See `AGENTS.md` for the clean-room rule that governs contributions.
 
+pub mod access;
 pub mod aprs;
 pub mod callsign;
 pub mod dupecheck;
@@ -29,6 +30,7 @@ pub mod packet;
 pub mod passcode;
 pub mod path;
 pub mod qconstruct;
+pub mod ratelimit;
 
 pub use aprs::{PacketType, ParsedPayload, Position};
 pub use callsign::{Callsign, CallsignError};

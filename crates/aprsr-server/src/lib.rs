@@ -136,6 +136,12 @@ pub struct ServerState {
     /// `None` when no UDP listener is configured, in which case a client asking for UDP
     /// delivery gets the TCP feed and a log line saying so.
     pub udp_out: Option<Arc<tokio::net::UdpSocket>>,
+    /// Who may connect and who may log in.
+    ///
+    /// Compiled once from the configuration rather than re-parsed per connection: the
+    /// address list is consulted on the accept path, which is the one place in the server
+    /// where the work done before a decision is made is work an attacker can ask for.
+    pub access: Arc<Access>,
     pub positions: Arc<PositionCache>,
     pub store: Option<Store>,
     /// Unix seconds when the server started.
@@ -146,6 +152,75 @@ pub struct ServerState {
     /// nothing is sent — and nothing is even formatted — unless somebody is subscribed. See
     /// [`ServerState::publish_packet`].
     packet_events: tokio::sync::broadcast::Sender<Arc<str>>,
+}
+
+/// The compiled access rules, built once from the configuration.
+#[derive(Debug, Default)]
+pub struct Access {
+    /// CIDR rules, checked the instant a connection is accepted.
+    pub addresses: aprsr_core::access::AccessList,
+    /// Callsigns refused at login.
+    pub callsigns: aprsr_core::access::Blocklist,
+    /// Sustained submissions per second per client; zero means unlimited.
+    pub packets_per_second: u32,
+    /// How far above that a client may burst.
+    pub burst: u32,
+}
+
+impl Access {
+    /// Compile the rules, falling back to "allow everything" on a block that will not parse.
+    ///
+    /// Unreachable in practice — `Config::validate` refuses the configuration first, so a
+    /// server never starts with one. It is handled anyway rather than unwrapped, and it
+    /// fails *open* with a loud warning: an access list that silently became "deny all"
+    /// because of a typo would take a working server off the network, which is a worse
+    /// outcome than the one it was trying to prevent.
+    #[must_use]
+    pub fn from_config(config: &aprsr_config::Access) -> Self {
+        use aprsr_core::access::{AccessList, Blocklist, Decision};
+
+        let default = match config.default {
+            aprsr_config::AccessDefault::Allow => Decision::Allow,
+            aprsr_config::AccessDefault::Deny => Decision::Deny,
+        };
+
+        let addresses = if config.has_address_rules() {
+            AccessList::new(
+                default,
+                config.allow.iter().map(String::as_str),
+                config.deny.iter().map(String::as_str),
+            )
+            .unwrap_or_else(|error| {
+                tracing::error!(
+                    %error,
+                    "an access list entry could not be compiled; \
+                     address filtering is disabled for this run"
+                );
+                AccessList::default()
+            })
+        } else {
+            AccessList::default()
+        };
+
+        Self {
+            addresses,
+            callsigns: Blocklist::new(config.block_callsigns.iter().map(String::as_str)),
+            packets_per_second: config.rate(),
+            burst: config.burst(),
+        }
+    }
+
+    /// Whether an address may connect at all.
+    #[must_use]
+    pub fn permits(&self, address: std::net::IpAddr) -> bool {
+        self.addresses.is_empty() || self.addresses.decide(address).is_allowed()
+    }
+
+    /// A limiter for one new client.
+    #[must_use]
+    pub const fn limiter(&self, now: u64) -> aprsr_core::ratelimit::RateLimiter {
+        aprsr_core::ratelimit::RateLimiter::new(self.packets_per_second, self.burst, now)
+    }
 }
 
 /// How many packets a slow subscriber may fall behind before it starts missing them.
@@ -162,6 +237,7 @@ impl ServerState {
             server_id: Arc::from(config.server.id.as_str()),
             uplinks: Arc::new(uplink::UplinkRegistry::from_config(&config.uplinks)),
             udp_out: None,
+            access: Arc::new(Access::from_config(&config.access)),
             config: std::sync::RwLock::new(config),
             config_path: None,
             metrics: Arc::new(Metrics::new()),

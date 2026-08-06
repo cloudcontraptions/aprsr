@@ -160,6 +160,46 @@ max_clients = 1000
 # protocol = "udp"
 # bind = "[::]:8080"
 
+# --- Access control -------------------------------------------------------------------
+#
+# Who may connect, who may log in, and how fast one client may talk. All of it is here
+# rather than in separate .acl files: one file that describes the whole server is easier
+# to review and to keep in version control than a .conf naming four files nobody
+# remembers the contents of.
+#
+# [access]
+#
+# What happens to an address no rule below covers. "allow" — the default — suits a public
+# APRS-IS server, which exists to be connected to. "deny" turns the lists into an
+# allowlist for a closed network.
+# default = "allow"
+#
+# CIDR blocks, or bare addresses meaning that one host. The MOST SPECIFIC rule wins, so
+# the pair below means "10/8 may connect, except 10.1.2.0/24" — and it means that
+# whichever order the two lines are written in. Order carrying no meaning is what stops
+# an ACL breaking when somebody appends a line.
+# allow = ["10.0.0.0/8", "2001:db8::/32"]
+# deny  = ["10.1.2.0/24", "192.0.2.66"]
+#
+# Blocked addresses are refused before the banner is even written — the check is the first
+# thing that happens on an accepted connection.
+#
+# Callsigns refused at login. A trailing "*" matches every SSID, as in the b/ filter,
+# which is what blocking a station means since SSIDs are free. Unlike a blocked address, a
+# blocked callsign is told so: it is usually a misconfigured station rather than a hostile
+# one, and one that knows it was refused can be fixed.
+# block_callsigns = ["N0SPAM*"]
+#
+# Sustained packets per second one client may submit; 0 (the default) is unlimited. A
+# client over its rate loses packets and keeps its connection — disconnecting would turn a
+# beacon interval that is slightly too short into a reconnect loop that costs more than
+# the packets did.
+#
+# The burst is what makes this usable: APRS traffic is legitimately bursty, and an IGate
+# quiet all night gates several packets the moment a net starts.
+# max_packets_per_second = 10
+# burst = 20
+
 # --- Uplinks ------------------------------------------------------------------------
 #
 # Outbound connections to other APRS-IS servers. Without at least one, aprsr is a

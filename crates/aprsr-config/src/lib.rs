@@ -55,6 +55,12 @@ pub enum ConfigError {
         #[source]
         source: aprsr_core::filter::FilterError,
     },
+    #[error("access list entry {found:?} is not usable: {source}")]
+    InvalidAccessBlock {
+        found: String,
+        #[source]
+        source: aprsr_core::access::CidrError,
+    },
     #[error("could not serialise configuration: {0}")]
     Serialise(#[from] toml::ser::Error),
 }
@@ -76,11 +82,117 @@ pub struct Config {
     pub database: Database,
     #[serde(default)]
     pub http: Http,
+    /// Skipped when it says nothing, so `convert-config` does not emit an empty `[access]`
+    /// table into a file converted from an `aprsc.conf` that had no ACLs.
+    #[serde(default, skip_serializing_if = "Access::is_default")]
+    pub access: Access,
     #[serde(default, rename = "listen")]
     pub listeners: Vec<Listener>,
     #[serde(default, rename = "uplink")]
     pub uplinks: Vec<Uplink>,
 }
+
+/// Who may connect, and how fast they may talk.
+///
+/// Written in TOML rather than in the separate ACL files aprsc uses. One file that describes
+/// the whole server is easier to review, to put under version control and to reason about
+/// than a `.conf` that names four `.acl` files whose contents nobody remembers — and
+/// configuration parity was never the goal.
+///
+/// `Default` is derived rather than written out, unlike [`Http`]: every field here is
+/// "absent means nothing configured", so the derived and the per-field defaults agree.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Access {
+    /// What to do with an address no `allow` or `deny` block covers.
+    ///
+    /// `allow` — the default — suits a public APRS-IS server, which exists to be connected
+    /// to. `deny` turns the lists into an allowlist for a closed network.
+    #[serde(default, skip_serializing_if = "AccessDefault::is_allow")]
+    pub default: AccessDefault,
+    /// CIDR blocks — or bare addresses, meaning that host — that may connect.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    /// Blocks that may not.
+    ///
+    /// The most specific rule wins, so a `deny` of `10.1.2.0/24` inside an `allow` of
+    /// `10.0.0.0/8` means what it looks like, whichever order they are written in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
+    /// Callsigns refused at login. A trailing `*` matches every SSID, as in the `b/` filter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub block_callsigns: Vec<String>,
+    /// Sustained packets per second one client may submit.
+    ///
+    /// Unset — and zero — mean unlimited. Both spellings exist because an operator who once
+    /// set a limit and then wanted it gone will reach for one or the other, and disagreeing
+    /// with them about which is a poor use of a configuration file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_packets_per_second: Option<u32>,
+    /// How far above that rate a client may burst, having been quiet.
+    ///
+    /// APRS traffic is legitimately bursty — an IGate quiet all night gates six packets when
+    /// a net starts — so a limit with no burst allowance would refuse normal operation.
+    /// Unset means [`DEFAULT_RATE_BURST`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst: Option<u32>,
+}
+
+/// What an address no rule covers may do.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AccessDefault {
+    #[default]
+    Allow,
+    Deny,
+}
+
+impl AccessDefault {
+    #[must_use]
+    pub const fn is_allow(&self) -> bool {
+        matches!(self, Self::Allow)
+    }
+}
+
+impl Access {
+    /// Whether any address rule is configured at all.
+    ///
+    /// When nothing is, the server skips the check on the accept path entirely.
+    #[must_use]
+    pub fn has_address_rules(&self) -> bool {
+        self.default == AccessDefault::Deny || !self.allow.is_empty() || !self.deny.is_empty()
+    }
+
+    /// Whether submissions are rate limited.
+    #[must_use]
+    pub fn is_rate_limited(&self) -> bool {
+        self.max_packets_per_second.is_some_and(|rate| rate > 0)
+    }
+
+    /// The sustained rate in force; zero means unlimited.
+    #[must_use]
+    pub fn rate(&self) -> u32 {
+        self.max_packets_per_second.unwrap_or(0)
+    }
+
+    /// The burst allowance in force.
+    #[must_use]
+    pub fn burst(&self) -> u32 {
+        self.burst.unwrap_or(DEFAULT_RATE_BURST)
+    }
+
+    /// Whether this section carries no rules at all.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Default burst allowance: twenty packets.
+///
+/// Comfortably above what any single station beacons and well below what a runaway script
+/// produces, so it bounds the damage without being reached in normal use.
+pub const DEFAULT_RATE_BURST: u32 = 20;
 
 /// Server identity and operator contact details.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -415,6 +527,18 @@ impl Config {
                     }
                 })?;
             }
+        }
+
+        // Every block is parsed at startup rather than at accept time. A typo in an ACL that
+        // only surfaced when the first connection arrived would be an ACL nobody could trust,
+        // and the failure would look like a network problem rather than a configuration one.
+        for block in self.access.allow.iter().chain(&self.access.deny) {
+            aprsr_core::access::Cidr::parse(block).map_err(|source| {
+                ConfigError::InvalidAccessBlock {
+                    found: block.clone(),
+                    source,
+                }
+            })?;
         }
 
         Ok(())

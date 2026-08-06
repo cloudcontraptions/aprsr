@@ -69,6 +69,16 @@ pub async fn serve(
         }
     };
 
+    // The address check comes first, before the socket option, before the banner, before
+    // anything is allocated for this connection. A blocked address should cost a `close()`
+    // and nothing else — this is the one place in the server where work done before a
+    // decision is work an attacker can ask for.
+    if !state.access.permits(peer.ip()) {
+        Metrics::incr(&state.metrics.connections_refused);
+        tracing::debug!(%peer, listener = %listener.name, "refusing a blocked address");
+        return;
+    }
+
     // Disable Nagle: APRS packets are small and latency-sensitive, and coalescing them
     // into larger segments only adds delay.
     if let Err(error) = socket.set_nodelay(true) {
@@ -86,43 +96,10 @@ pub async fn serve(
     let mut lines = FramedRead::new(reader, LineCodec::with_max_length(MAX_PACKET_LEN));
     let mut writer = BufWriter::new(writer);
 
-    // 1. The banner, before the client says anything.
-    let banner = Banner {
-        software: crate::SOFTWARE_NAME,
-        version: crate::VERSION,
-        server_id: &state.server_id,
-    };
-    if write_line(&mut writer, &banner.to_string()).await.is_err() {
-        return;
-    }
-
-    // 2. The login line.
-    let Some(login) = read_login(&mut lines).await else {
-        Metrics::incr(&state.metrics.logins_rejected);
+    let Some((login, verification)) = handshake(&mut lines, &mut writer, peer, &state).await else {
         return;
     };
-
-    let verification = login.verify();
     let callsign: Arc<str> = Arc::from(login.callsign.as_str());
-
-    // 3. The acknowledgement. An invalid passcode is answered rather than dropped: the
-    //    connection stays usable read-only, which is what a misconfigured client needs to
-    //    see in order to diagnose itself.
-    let response = LoginResponse {
-        callsign: &callsign,
-        verification,
-        server_id: &state.server_id,
-    };
-    if write_line(&mut writer, &response.to_string())
-        .await
-        .is_err()
-    {
-        return;
-    }
-    if verification == Verification::Invalid {
-        Metrics::incr(&state.metrics.logins_rejected);
-        tracing::info!(%peer, callsign = %callsign, "login with an invalid passcode, continuing read-only");
-    }
 
     let (client, outbox_rx) =
         register(&login, verification, &callsign, peer, &listener, &state).await;
@@ -176,6 +153,67 @@ pub async fn serve(
 
     disconnect(&client, &state).await;
     tracing::info!(%peer, callsign = %callsign, "client disconnected");
+}
+
+/// Run the three-line handshake, returning the login when the client may proceed.
+///
+/// Per <http://www.aprs-is.net/Connecting.aspx>: banner, login line, acknowledgement. The
+/// callsign blocklist sits between the second and the third, because the login is the first
+/// moment the callsign is known.
+async fn handshake(
+    lines: &mut FramedRead<tokio::net::tcp::OwnedReadHalf, LineCodec>,
+    writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
+    peer: std::net::SocketAddr,
+    state: &ServerState,
+) -> Option<(LoginRequest, Verification)> {
+    // 1. The banner, before the client says anything.
+    let banner = Banner {
+        software: crate::SOFTWARE_NAME,
+        version: crate::VERSION,
+        server_id: &state.server_id,
+    };
+    write_line(writer, &banner.to_string()).await.ok()?;
+
+    // 2. The login line.
+    let Some(login) = read_login(lines).await else {
+        Metrics::incr(&state.metrics.logins_rejected);
+        return None;
+    };
+    let verification = login.verify();
+    let callsign = login.callsign.as_str();
+
+    // Unlike a blocked address, a blocked callsign is *told* it is blocked: the operator's
+    // problem is usually a misconfigured station rather than a hostile one, and a station
+    // that knows it has been refused can be fixed, while one that sees a silent disconnect
+    // files a bug against its own software.
+    if state.access.callsigns.blocks(callsign) {
+        Metrics::incr(&state.metrics.connections_refused);
+        Metrics::incr(&state.metrics.logins_rejected);
+        tracing::info!(%peer, %callsign, "refusing a blocked callsign");
+        let _ = write_line(
+            writer,
+            &format!("# {} {callsign} blocked", crate::SOFTWARE_NAME),
+        )
+        .await;
+        return None;
+    }
+
+    // 3. The acknowledgement. An invalid passcode is answered rather than dropped: the
+    //    connection stays usable read-only, which is what a misconfigured client needs to
+    //    see in order to diagnose itself.
+    let response = LoginResponse {
+        callsign,
+        verification,
+        server_id: &state.server_id,
+    };
+    write_line(writer, &response.to_string()).await.ok()?;
+
+    if verification == Verification::Invalid {
+        Metrics::incr(&state.metrics.logins_rejected);
+        tracing::info!(%peer, %callsign, "login with an invalid passcode, continuing read-only");
+    }
+
+    Some((login, verification))
 }
 
 /// Remove a client from the registry and close its connection log row.
@@ -437,6 +475,13 @@ async fn read_submissions(
 ) {
     let timeout = state.config().limits.client_timeout.as_duration();
 
+    // One limiter per connection, owned by the task that reads it — so no lock, and a
+    // client's rate is its own rather than being shared with everyone on its port.
+    let mut limiter = state.access.limiter(now_secs());
+    // Logged once per connection rather than per packet: a client in a loop would otherwise
+    // fill the log faster than it fills the dispatch queue.
+    let mut warned_about_rate = false;
+
     loop {
         let next = tokio::select! {
             next = tokio::time::timeout(timeout, lines.next()) => next,
@@ -486,6 +531,23 @@ async fn read_submissions(
         }
 
         Metrics::incr(&client.counters.packets_received);
+
+        // The rate limit applies to packets, not to the connection: filter commands and
+        // keepalives above are already past. A client over its rate loses the packet and
+        // keeps its connection — disconnecting would turn a beacon interval that is slightly
+        // too short into a reconnect loop, which costs the server more than the packets did.
+        if !limiter.try_take(now_secs()) {
+            Metrics::incr(&state.metrics.packets_rate_limited);
+            Metrics::incr(&client.counters.packets_dropped);
+            if !warned_about_rate {
+                warned_about_rate = true;
+                tracing::info!(
+                    callsign = %client.callsign,
+                    "client is over its submission rate; packets are being dropped"
+                );
+            }
+            continue;
+        }
 
         let submitted = dispatcher.submit(Ingest {
             line,

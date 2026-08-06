@@ -26,6 +26,8 @@ Update this file in the same change that moves an item.
   its own handshake, never from configuration.
 - **UDP** — `udpsubmit` ports, which are the only way a `qAU` construct is ever produced, and
   feed delivery to a client whose login carried `UDP <port>`.
+- **Access control** — CIDR allow and deny lists with longest-prefix matching, a callsign
+  blocklist, and a per-client token-bucket rate limit on submissions.
 - **Dispatch** — single ingest task, bounded per-client queues, slow clients drop packets
   rather than stalling the server.
 - **Persistence** — SQLite via SeaORM: station positions (loaded at start, saved every
@@ -59,9 +61,6 @@ currently dropped rather than relayed. Fixing this means moving the packet types
 onto `&[u8]`, which touches every parser in `aprsr-core`.
 
 **TLS** — for client connections and uplinks.
-
-**ACL enforcement** — the `acl_entry` table and the `acl` option in `aprsc.conf` are
-recognised, but nothing consults them yet.
 
 ## Later
 

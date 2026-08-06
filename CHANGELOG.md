@@ -9,6 +9,35 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Access control and rate limiting**, in an `[access]` section rather than the separate
+  `.acl` files aprsc uses — one file that describes the whole server is easier to review and
+  to keep in version control than a `.conf` naming four files nobody remembers the contents
+  of. `convert-config` says so on an `acl` option rather than dropping it silently.
+
+  Address rules are CIDR blocks, or bare addresses meaning that one host, and **the most
+  specific rule wins**. That is how every prefix list a sysop has used behaves, and it means
+  the order of lines does not change the meaning of the file — ordering rules are the classic
+  way an ACL that reads correctly starts doing the wrong thing after somebody appends a line.
+  An exact tie between an allow and a deny resolves to deny. `default = "deny"` turns the
+  lists into an allowlist for a closed network.
+
+  The address check is the first thing that happens on an accepted connection: before the
+  socket options, before the banner, before anything is allocated. It is also the one place
+  in the server where work done before a decision is work an attacker can ask for. An
+  IPv4-mapped address is unmapped first, so IPv4 rules keep working when a bind changes from
+  `0.0.0.0` to `[::]`.
+
+  A callsign blocklist is checked at the login, and a blocked callsign is *told* — a
+  misconfigured station that knows it was refused can be fixed, while one that sees a silent
+  disconnect files a bug against its own software.
+
+  The rate limit is a token bucket per client: a sustained rate with a burst allowance,
+  because APRS traffic is legitimately bursty and an IGate quiet all night gates several
+  packets the moment a net starts. A client over its rate loses packets and keeps its
+  connection; disconnecting would turn a beacon interval that is slightly too short into a
+  reconnect loop costing more than the packets did. Keepalives and `filter` commands do not
+  consume credit. Two new counters, `connections_refused` and `packets_rate_limited`, appear
+  in `status.json` and `/metrics`.
 - **UDP, both directions.** A `udpsubmit` port accepts datagrams carrying a login line and
   one or more packets, with no connection and no session — which is how a weather station
   that beacons every five minutes avoids holding a socket open for a day. It is also the only
@@ -245,7 +274,7 @@ aprsr is an independent implementation and contains no source code from
 [aprsc](https://github.com/hessu/aprsc), whose architecture it follows with thanks. See
 [`NOTICE`](NOTICE) and [`docs/attribution.md`](docs/attribution.md).
 
-Peer links, TLS and ACL enforcement are not in this release; see
+Peer links and TLS are not in this release; see
 [`docs/roadmap.md`](docs/roadmap.md).
 
 [Unreleased]: https://github.com/cloudcontraptions/aprsr/commits/main

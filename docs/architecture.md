@@ -65,7 +65,7 @@ which part of aprsr, so a reader familiar with one can navigate the other.
 | `netlib.c` (UDP paths) | `aprsr-server/src/udp.rs` | `udpsubmit` ingest and `UDP <port>` feed delivery |
 | `http.c`, `status.c` | `aprsr-web/` | Actix Web and Askama replace the embedded HTTP server |
 | `counterdata.c` | `aprsr-server/src/metrics.rs`, `aprsr-store` (`counter_sample`) | Live atomics, sampled to the database |
-| `acl.c` | `aprsr-store` (`acl_entry`) | Table exists; enforcement is on the roadmap |
+| `acl.c` | `aprsr-core/src/access.rs` + `ratelimit.rs` | Rules live in `[access]` in the one config file, not in separate `.acl` files |
 | `uplink.c` | `aprsr-server/src/uplink.rs` | Outbound links; the supervisor is to an uplink what `accept_loop` is to a listener |
 | `tls.c`, `sctp.c` | — | On the roadmap |
 | `hmalloc.c`, `cellmalloc.c`, `keyhash.c`, `xpoll.c`, `rwlock.c` | — | No equivalent needed: Rust's allocator, `ahash`, tokio and `std::sync` cover these |

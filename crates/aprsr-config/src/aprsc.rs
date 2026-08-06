@@ -13,7 +13,8 @@ use std::path::PathBuf;
 
 use crate::duration::Interval;
 use crate::{
-    Config, Database, Http, Limits, Listener, PortKind, Protocol, Server, Uplink, UplinkKind,
+    Access, Config, Database, Http, Limits, Listener, PortKind, Protocol, Server, Uplink,
+    UplinkKind,
 };
 
 /// Why an `aprsc.conf` file could not be read at all.
@@ -186,6 +187,7 @@ pub fn convert(text: &str) -> Result<Conversion, ConvertError> {
             database: Database::default(),
             http,
             listeners,
+            access: Access::default(),
             uplinks,
         },
         warnings,
@@ -283,11 +285,15 @@ fn parse_listen(
                 listener.max_clients = Some(number(line, "client limit", value)?);
                 i += 2;
             }
+            // The capability exists; only aprsc's shape for it does not. aprsr keeps access
+            // rules in the `[access]` section of the one configuration file rather than in
+            // a separate `.acl` file per port, so there is nothing to read off this line —
+            // the operator has to copy the contents of that file across, and is told so.
             "acl" => {
                 warnings.push(Warning::OptionDropped {
                     line,
                     option: option.clone(),
-                    reason: "address-based access control is on the roadmap",
+                    reason: "aprsr keeps access rules in [access]; copy the file's contents there",
                 });
                 i += 2;
             }

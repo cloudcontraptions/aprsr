@@ -297,6 +297,8 @@ mod tests {
                 clients_connected: 42,
                 clients_total: 1_000,
                 logins_rejected: 3,
+                connections_refused: 2,
+                packets_rate_limited: 4,
             },
             listeners: vec![
                 ListenerInfo {
