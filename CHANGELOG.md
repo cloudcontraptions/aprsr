@@ -27,6 +27,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whitespace before the filter sees it. It takes the rest of the line, and an expression that
   puts another filter after it is now an error rather than silently folding that filter into
   an object name.
+- **`t/c` (CWOP) in the type filter.** Not in the specification's `poimqstunw` letter set,
+  but aprsc accepts it, so rejecting it made a filter string that works against the reference
+  server an error here. Recognition is a heuristic over the `CW`/`DW`/`EW` callsign series,
+  documented as approximate alongside `t/n`.
 - **Packets that must not reach APRS-IS are now refused at ingest**: a path carrying
   `NOGATE` or `RFONLY`, a third-party packet whose inner header shows it has already been on
   APRS-IS, and general queries. The check runs before the q algorithm, so a packet nobody may

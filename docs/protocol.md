@@ -111,7 +111,12 @@ packet is dropped regardless of what else matched.
 | `f/` | `f/call/dist` | Within `dist` km of another station's last known position |
 
 Type letters: `p` position, `o` object, `i` item, `m` message, `q` query, `s` status,
-`t` telemetry, `u` user-defined, `n` NWS, `w` weather.
+`t` telemetry, `u` user-defined, `n` NWS, `w` weather, and `c` CWOP.
+
+`c` is **not** in the specification's letter set, which is `poimqstunw`. aprsc accepts it,
+so a client filter string that works against the reference server would otherwise fail here
+— a compatibility break rather than useful strictness. It is implemented as an extension and
+marked as such in the source.
 
 Bounds, because filter strings arrive from unauthenticated clients: at most 64 filters per
 expression, 64 entries per list-valued filter, and 9 `a/` filters (the specification's own
@@ -135,6 +140,9 @@ padding by then.
   heuristic over the conventions, not a specified format.
 - **`q/…/I`.** The analysis field is documented only as "I passes IGATE positions". aprsr
   reads that as: also pass position packets whose construct is `qAR` or `qAr`.
+- **`t/c` (CWOP).** Undocumented, and like `t/n` a heuristic over callsigns: the Citizen
+  Weather Observer Program issues `CW`, `DW` and `EW` series calls followed by digits. The
+  digit test is what keeps the National Weather Service's `CWA` prefix out of it.
 
 ## Position encodings
 
