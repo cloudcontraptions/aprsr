@@ -59,7 +59,7 @@ reported on stderr rather than dropped silently.
 | **Framing** | TNC2 with the 512-byte limit enforced at the codec, before allocation |
 | **Login** | The full handshake, passcode verification, receive-only (`pass -1`) connections |
 | **q constructs** | `qAC qAX qAU qAo qAO qAS qAr qAR qAZ qAI`, the client-to-server algorithm, and the reject rules for loops and internal traffic |
-| **Filters** | `r/ p/ b/ o/ t/ s/ d/ a/ e/ g/ u/ q/ m/ f/` — additive, negatable with `-`, bounded against hostile input |
+| **Filters** | `r/ p/ b/ o/ os/ t/ s/ d/ a/ e/ g/ u/ q/ m/ f/` — additive, negatable with `-`, bounded against hostile input |
 | **Duplicates** | A rolling 30-second window keyed on the transmission, not the path |
 | **Ports** | `fullfeed`, `igate` with per-client filters, per-port forced filters and client caps |
 | **Persistence** | SQLite via SeaORM: station positions, connection log, sampled counters |

@@ -106,6 +106,10 @@ pub enum FilterError {
     DistanceOutOfRange { value: f64 },
     #[error("type filter {value:?} contains a letter that is not one of poimqstunw")]
     UnknownTypeLetter { value: String },
+    #[error("an os/ filter must be the last filter on the line")]
+    StrictObjectNotLast,
+    #[error("an expression may contain only one os/ filter")]
+    MultipleStrictObject,
 }
 
 /// A single parsed filter.
@@ -123,6 +127,26 @@ pub enum Filter {
     Budlist(Box<[Box<str>]>),
     /// `o/obj1/obj2/…` — objects and items with these names.
     Object(Box<[Box<str>]>),
+    /// `os/` — the strict object filter.
+    ///
+    /// Per <http://www.aprs-is.net/javAPRSFilter.aspx>: "Pass all objects with the exact
+    /// name of obj1, obj2, ... Objects are always 9 characters and Items are 3 to 9
+    /// characters. There can only be one os filter and that filter must be at the end of
+    /// the line."
+    ///
+    /// The two constraints in that last sentence are not arbitrary, and they are the whole
+    /// point of the filter. Unlike `o/`, whose specification says "spaces not allowed",
+    /// `os/` carries no such restriction — and object names are a fixed nine-character
+    /// field that may well contain spaces. Since a filter expression is split on
+    /// whitespace, a name with a space in it can only be written by taking the rest of the
+    /// line, which is possible for exactly one filter and only if it comes last.
+    ///
+    /// Matching itself is identical to [`Filter::Object`]. The sentence about lengths
+    /// describes the *packet format*, not an extra test applied here: `aprs::parse` already
+    /// reads objects from a nine-character field and items from a three-to-nine-character
+    /// one, and trims the padding. Re-checking the trimmed name against those lengths would
+    /// reject `FIELDDAY`, which is a perfectly ordinary object.
+    StrictObject(Box<[Box<str>]>),
     /// `t/poimqstunw` or `t/poimqstunw/call/km` — packet categories, optionally limited
     /// to a radius around a station.
     Type {
@@ -183,6 +207,10 @@ impl Filter {
             "p" => Ok(Self::Prefix(list(code, &args)?)),
             "b" => Ok(Self::Budlist(list(code, &args)?)),
             "o" => Ok(Self::Object(list(code, &args)?)),
+            // Reached only through `FilterChain::parse`, which hands over the whole
+            // remainder of the line. Parsing `os/` on its own here would silently drop any
+            // name containing a space, which is the one thing this filter exists to allow.
+            "os" => Ok(Self::StrictObject(list(code, &args)?)),
             "d" => Ok(Self::Digipeater(list(code, &args)?)),
             "e" => Ok(Self::Entry(list(code, &args)?)),
             "g" => Ok(Self::Group(list(code, &args)?)),
@@ -264,6 +292,13 @@ impl Filter {
                 .iter()
                 .any(|c| matches_pattern(c, ctx.packet.source())),
             Self::Object(names) => ctx
+                .parsed
+                .object_name
+                .is_some_and(|name| names.iter().any(|n| matches_pattern(n, name))),
+            // Matching is the same as `o/`. The difference is entirely in what can be
+            // *asked for*: because this filter takes the rest of the line, its argument may
+            // contain spaces, and so it can name an object that `o/` cannot address at all.
+            Self::StrictObject(names) => ctx
                 .parsed
                 .object_name
                 .is_some_and(|name| names.iter().any(|n| matches_pattern(n, name))),
@@ -403,7 +438,10 @@ impl FilterChain {
         let mut entries = Vec::new();
         let mut area_filters = 0usize;
 
-        for token in expression.split_ascii_whitespace() {
+        // Byte offsets are tracked alongside the tokens so that an `os/` filter can take
+        // the rest of the line verbatim, spaces and all.
+        let mut remainder = expression;
+        while let Some(token) = next_token(&mut remainder) {
             if entries.len() >= MAX_FILTERS {
                 return Err(FilterError::TooManyFilters);
             }
@@ -414,7 +452,38 @@ impl FilterChain {
             if body.is_empty() {
                 return Err(FilterError::Empty);
             }
-            let filter = Filter::parse(body)?;
+
+            // `os/` is the one filter whose argument may contain spaces, so it takes the
+            // rest of the line. That is why the specification allows only one and requires
+            // it last — but "requires" is worth enforcing rather than assuming, because
+            // absorbing a filter the operator wrote after it would silently deliver a
+            // different feed than they asked for.
+            let filter = if is_strict_object(body) {
+                if let Some(stray) = remainder
+                    .split_ascii_whitespace()
+                    .find(|token| looks_like_a_filter(token))
+                {
+                    // Almost certainly a filter the operator expected to take effect; it
+                    // would otherwise have disappeared into an object name. The
+                    // specification forbids both a second `os/` and anything after the
+                    // first, so say which of the two happened.
+                    let stray_body = stray.strip_prefix('-').unwrap_or(stray);
+                    return Err(if is_strict_object(stray_body) {
+                        FilterError::MultipleStrictObject
+                    } else {
+                        FilterError::StrictObjectNotLast
+                    });
+                }
+                let whole = if remainder.is_empty() {
+                    body.to_owned()
+                } else {
+                    format!("{body} {remainder}")
+                };
+                remainder = "";
+                Filter::parse(&whole)?
+            } else {
+                Filter::parse(body)?
+            };
             if matches!(filter, Filter::Area { .. }) {
                 area_filters += 1;
                 if area_filters > MAX_AREA_FILTERS {
@@ -489,6 +558,7 @@ impl std::fmt::Display for Filter {
             Self::Prefix(items) => joined(f, "p", items),
             Self::Budlist(items) => joined(f, "b", items),
             Self::Object(items) => joined(f, "o", items),
+            Self::StrictObject(items) => joined(f, "os", items),
             Self::Digipeater(items) => joined(f, "d", items),
             Self::Entry(items) => joined(f, "e", items),
             Self::Group(items) => joined(f, "g", items),
@@ -574,6 +644,40 @@ fn exact<'a, const N: usize>(
         expected,
         found: args.len(),
     })
+}
+
+/// Take the next whitespace-separated token, leaving the rest of the line in `remainder`.
+///
+/// Returned separately from `split_ascii_whitespace` so that `os/` can claim everything
+/// still unconsumed, including the spaces inside an object name.
+fn next_token<'a>(remainder: &mut &'a str) -> Option<&'a str> {
+    let trimmed = remainder.trim_start();
+    if trimmed.is_empty() {
+        *remainder = "";
+        return None;
+    }
+    let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+    let (token, rest) = trimmed.split_at(end);
+    *remainder = rest.trim_start();
+    Some(token)
+}
+
+/// Whether a token is the strict object filter, negated or not.
+fn is_strict_object(body: &str) -> bool {
+    let code = body.split('/').next().unwrap_or_default();
+    code.eq_ignore_ascii_case("os")
+}
+
+/// Whether a token looks like somebody meant it as a filter rather than as an object name.
+///
+/// Used only to catch a filter written *after* `os/`, which would otherwise be swallowed
+/// into an object name. One or two letters and a slash is the shape every filter code has.
+fn looks_like_a_filter(token: &str) -> bool {
+    let body = token.strip_prefix('-').unwrap_or(token);
+    let Some((code, _)) = body.split_once('/') else {
+        return false;
+    };
+    !code.is_empty() && code.len() <= 2 && code.chars().all(|c| c.is_ascii_alphabetic())
 }
 
 fn list(code: &str, args: &[&str]) -> Result<Box<[Box<str>]>, FilterError> {

@@ -21,6 +21,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   hard limit is lower than the configured value aprsr requests the most it can get and
   warns; Windows has no equivalent per-process limit and says so.
 - **`dual_stack` on a listener**, for an IPv6 port that should accept IPv6 only.
+- **The `os/` strict object filter**, which was previously rejected at parse time. It is the
+  only filter whose argument may contain a space, so it can address an object named
+  `NET MTG` — something `o/` cannot express at all, because the expression is split on
+  whitespace before the filter sees it. It takes the rest of the line, and an expression that
+  puts another filter after it is now an error rather than silently folding that filter into
+  an object name.
 - **The server-to-server half of the q algorithm** (`qconstruct::apply_server`), which is
   what a packet arriving over an uplink or peer link needs. A packet with no construct gets
   `qAS` and the sending server's login; one that already has a construct keeps it, because

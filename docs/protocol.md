@@ -97,7 +97,8 @@ packet is dropped regardless of what else matched.
 | `r/` | `r/lat/lon/dist` | Positions within `dist` km. Inclusive at the boundary |
 | `p/` | `p/aa/bb/…` | Source callsign starting with any prefix |
 | `b/` | `b/call/…` | Source callsign exactly; `*` suffix wildcards |
-| `o/` | `o/name/…` | Object and item names |
+| `o/` | `o/name/…` | Object and item names. Spaces are not allowed, so a name containing one is unreachable |
+| `os/` | `os/name/…` | The same, but the argument may contain spaces. Takes the rest of the line, so only one is allowed and it must come last |
 | `t/` | `t/poimqstunw` or `t/…/call/km` | Packet categories, optionally within `km` of a station |
 | `s/` | `s/pri/alt/over` | Symbol code on the primary table, alternate table, or an overlay |
 | `d/` | `d/call/…` | Stations that actually digipeated the packet — the used (`*`) flag |
@@ -116,6 +117,16 @@ Bounds, because filter strings arrive from unauthenticated clients: at most 64 f
 expression, 64 entries per list-valued filter, and 9 `a/` filters (the specification's own
 limit).
 
+`os/` is the one filter whose argument may contain spaces, which is why the specification
+requires it last and allows only one. An object name is a fixed nine-character field and may
+well have a space in it — `NET MTG` — and a whitespace-separated expression cannot otherwise
+express that. aprsr therefore gives `os/` the whole remainder of the line, and rejects an
+expression that puts another filter after it rather than quietly absorbing that filter into
+an object name. The specification's note that "objects are always 9 characters and items are
+3 to 9" describes the packet format, which the parser already applies when it extracts the
+name; it is not a second test applied at match time, since the name is trimmed of its
+padding by then.
+
 ### Where aprsr is approximate
 
 - **`t/n` (NWS).** APRS-IS does not define NWS traffic by a data type identifier — these
@@ -124,8 +135,6 @@ limit).
   heuristic over the conventions, not a specified format.
 - **`q/…/I`.** The analysis field is documented only as "I passes IGATE positions". aprsr
   reads that as: also pass position packets whose construct is `qAR` or `qAr`.
-- **`os/` (strict object).** Not implemented; the parser rejects it rather than treating it
-  as `o/`.
 
 ## Position encodings
 

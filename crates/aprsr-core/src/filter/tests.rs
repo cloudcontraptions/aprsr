@@ -62,6 +62,13 @@ const MESSAGE: &str = "OH7LZB>APRS,TCPIP*,qAC,T2FINLAND::K1ABC    :Hello there{0
 // Object names may contain spaces, but a filter expression is whitespace-separated, so a
 // name with a space is not addressable by `o/`. The fixture uses a space-free name.
 const OBJECT: &str = "OH7LZB>APRS,TCPIP*,qAC,T2FINLAND:;FIELDDAY *092345z6010.20N/02456.40E-";
+// The name field is nine characters wide, so a name with a space in it is perfectly legal
+// and reasonably common — "NET MTG" here. `o/` cannot address it at all; `os/` exists for
+// exactly this case.
+const SPACED_OBJECT: &str =
+    "OH7LZB>APRS,TCPIP*,qAC,T2FINLAND:;NET MTG  *092345z6010.20N/02456.40E-";
+// An item, which uses a different name encoding: 3 to 9 characters ended by ! or _.
+const ITEM: &str = "OH7LZB>APRS,TCPIP*,qAC,T2FINLAND:)AID#2!6010.20N/02456.40E-";
 const DIGIPEATED: &str = "OH7LZB>APRS,OH2RCH*,WIDE2-1,qAR,OH2GATE:=6010.20N/02456.40E-";
 const WEATHER: &str = "OH7LZB>APRS,TCPIP*,qAC,T2FINLAND:=6010.20N/02456.40E_220/004g005t077";
 
@@ -143,6 +150,63 @@ fn budlist_filter(#[case] expression: &str, #[case] packet: &str, #[case] expect
 #[case("o/FIELDDAY", HELSINKI, false)] // not an object packet
 fn object_filter(#[case] expression: &str, #[case] packet: &str, #[case] expected: bool) {
     assert_eq!(passes(expression, packet), expected);
+}
+
+// --- os/ strict object -------------------------------------------------------------
+//
+// Per http://www.aprs-is.net/javAPRSFilter.aspx the strict form differs from `o/` in what
+// can be asked for, not in what matches: its argument may contain spaces, so it can name an
+// object that a whitespace-separated expression otherwise cannot reach.
+
+#[rstest]
+#[case("os/FIELDDAY", OBJECT, true)] // behaves as o/ does for an ordinary name
+#[case("os/FIELD*", OBJECT, true)] // wildcards still apply
+#[case("os/PICNIC", OBJECT, false)]
+#[case("os/NET MTG", SPACED_OBJECT, true)] // the case o/ cannot express at all
+#[case("os/NET*", SPACED_OBJECT, true)]
+#[case("os/NET MTG", OBJECT, false)] // a different object
+#[case("os/AID#2", ITEM, true)] // items carry names too
+#[case("os/FIELDDAY", HELSINKI, false)] // a position packet has no object name
+fn strict_object_filter(#[case] expression: &str, #[case] packet: &str, #[case] expected: bool) {
+    assert_eq!(passes(expression, packet), expected);
+}
+
+/// The plain `o/` filter cannot reach a name with a space, because the expression is split
+/// on whitespace before the filter ever sees it: the second word becomes a separate token,
+/// and it is not a filter. This is precisely the gap `os/` fills, so it is worth pinning
+/// rather than leaving as folklore — and the failure is a parse error, not a silent
+/// non-match, which is the friendlier of the two outcomes.
+#[test]
+fn the_plain_object_filter_cannot_address_a_name_containing_a_space() {
+    assert_eq!(
+        FilterChain::parse("o/NET MTG").unwrap_err(),
+        FilterError::UnknownType {
+            code: "MTG".to_owned()
+        }
+    );
+}
+
+/// Taking the rest of the line means anything written after it would silently vanish into
+/// an object name, so the specification's "must be at the end of the line" is enforced
+/// rather than assumed.
+#[rstest]
+#[case("os/FIELDDAY r/60/25/50", FilterError::StrictObjectNotLast)]
+#[case("os/FIELDDAY -t/o", FilterError::StrictObjectNotLast)]
+#[case("os/FIELDDAY os/PICNIC", FilterError::MultipleStrictObject)]
+fn a_strict_object_filter_must_come_last(#[case] expression: &str, #[case] expected: FilterError) {
+    assert_eq!(FilterChain::parse(expression).unwrap_err(), expected);
+}
+
+/// Filters written *before* it are fine — it only has to be last.
+#[test]
+fn filters_before_a_strict_object_filter_are_kept() {
+    assert!(passes("t/o os/NET MTG", SPACED_OBJECT));
+    let chain = FilterChain::parse("t/o os/NET MTG").expect("parses");
+    assert_eq!(
+        chain.to_string(),
+        "t/o os/NET MTG",
+        "a name with a space survives the round trip back to wire form"
+    );
 }
 
 // --- t/ type -----------------------------------------------------------------------

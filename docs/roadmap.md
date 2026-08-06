@@ -14,7 +14,7 @@ Update this file in the same change that moves an item.
 - **q constructs** — all ten codes, both halves of the algorithm (client-to-server and
   server-to-server, including `qAS` and the `qAI` trace), and the reject rules for `qAZ`,
   `qAC` without a TCPIP marker, self-loops and repeated callsigns.
-- **Filters** — `r/ p/ b/ o/ t/ s/ d/ a/ e/ g/ u/ q/ m/ f/`, additive with `-` negation,
+- **Filters** — `r/ p/ b/ o/ os/ t/ s/ d/ a/ e/ g/ u/ q/ m/ f/`, additive with `-` negation,
   bounded against hostile input.
 - **Duplicate detection** — rolling window keyed on the transmission rather than the path.
 - **Ports** — `fullfeed` and `igate`, per-port forced filters, per-port client caps,
@@ -64,7 +64,6 @@ recognised, but nothing consults them yet.
   live totals.
 - **Server-to-server messaging** — APRS messages addressed to the server itself
   (aprsc's `messaging.c`).
-- **`os/` strict object filter** — currently rejected at parse time rather than accepted.
 - **`t/n` NWS matching** — a heuristic over callsign prefixes; see `protocol.md`.
 - **SCTP** — aprsc supports it; whether it is worth carrying forward is an open question.
 - **Historical position tracking** — `station_position` keeps only the latest fix per
