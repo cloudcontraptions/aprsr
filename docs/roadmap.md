@@ -76,9 +76,14 @@ recognised, but nothing consults them yet.
 
 - **Rewriting packets beyond the q construct.** APRS-IS relays payloads verbatim, and
   aprsr will not start editing them.
-Previously listed here and since reversed: **a built-in map**. The reasoning was that plenty
-of good clients already plot APRS stations, which is true — but they plot *the network*, and
-none of them answers the question an operator actually has, which is what *this server* is
-hearing. That is a different question, and the dashboard is where it belongs. Tiles come from
-a configurable server, and setting `http.map_tile_url = ""` draws stations on a plain
-background and contacts nobody, so the feature does not force a closed network to open.
+
+### Reversed
+
+**A built-in map** was listed here. The reasoning was that plenty of good clients already
+plot APRS stations, which is true — but they plot *the network*, and none of them answers
+the question an operator actually has, which is what *this server* is hearing. That is a
+different question, and the dashboard is where it belongs.
+
+Tiles come from a configurable server, and setting `http.map_tile_url = ""` draws stations
+on a plain background and contacts nobody, so the feature does not force a closed network
+to open.
