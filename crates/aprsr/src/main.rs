@@ -29,6 +29,9 @@ async fn main() -> Result<()> {
             commands::passcode(&callsign);
             Ok(())
         }
+        Command::Healthcheck { config, address } => {
+            commands::healthcheck(&config, address.as_deref()).await
+        }
     }
 }
 

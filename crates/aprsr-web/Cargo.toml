@@ -10,7 +10,6 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
-actix-files.workspace = true
 actix-web.workspace = true
 aprsr-config.workspace = true
 aprsr-core.workspace = true

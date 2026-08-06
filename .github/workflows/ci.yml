@@ -106,3 +106,104 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  # The image is built and *run* rather than only built. A Dockerfile that compiles but
+  # produces an image which cannot start — a missing shared library, a data directory the
+  # unprivileged user cannot write, a healthcheck that always fails — is exactly the failure
+  # a build-only job misses, and it is the failure an operator hits first.
+  #
+  # Not published anywhere. This gate answers "does it work", not "where do I get it".
+  container:
+    name: Container
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        run: docker build -t aprsr:ci .
+
+      # A configuration good enough to start with, written here rather than committed: the
+      # example file deliberately refuses to start until an operator sets a real callsign,
+      # and a committed test config that did start would be a config somebody eventually
+      # deploys by accident.
+      - name: Write a test configuration
+        run: |
+          mkdir -p ci-data
+          cat > ci-aprsr.toml <<'TOML'
+          [server]
+          id = "T2CI"
+          run_dir = "/var/lib/aprsr"
+
+          [database]
+          url = "sqlite:///var/lib/aprsr/aprsr.sqlite?mode=rwc"
+
+          [http]
+          status_bind = "0.0.0.0:14501"
+
+          [[listen]]
+          name = "Clients"
+          kind = "igate"
+          bind = "0.0.0.0:14580"
+          TOML
+
+      - name: The configuration is understood
+        run: |
+          docker run --rm -v "$PWD/ci-aprsr.toml:/etc/aprsr/aprsr.toml:ro" \
+            aprsr:ci check-config --config /etc/aprsr/aprsr.toml
+
+      - name: Start
+        run: |
+          docker run -d --name aprsr-ci \
+            -p 14580:14580 -p 14501:14501 \
+            -v "$PWD/ci-aprsr.toml:/etc/aprsr/aprsr.toml:ro" \
+            -v aprsr-ci-data:/var/lib/aprsr \
+            aprsr:ci
+
+      - name: It becomes healthy
+        run: |
+          for _ in $(seq 30); do
+            state=$(docker inspect -f '{{.State.Health.Status}}' aprsr-ci)
+            if [ "$state" = "healthy" ]; then
+              echo "healthy"
+              exit 0
+            fi
+            if [ "$state" = "unhealthy" ]; then
+              break
+            fi
+            sleep 2
+          done
+          echo "::error::the container never became healthy"
+          docker logs aprsr-ci
+          exit 1
+
+      # The point of the whole job: a client can complete the APRS-IS handshake against the
+      # container from outside it.
+      - name: A client can log in
+        run: |
+          response=$(printf 'user N0CALL pass -1 vers ci 0.1 filter t/p\r\n' \
+            | timeout 10 nc -q 2 localhost 14580 || true)
+          echo "$response"
+          echo "$response" | grep -q '^# aprsr' \
+            || { echo "::error::no banner from the container"; exit 1; }
+          echo "$response" | grep -q 'logresp N0CALL' \
+            || { echo "::error::no login response from the container"; exit 1; }
+
+      - name: The dashboard answers
+        run: |
+          curl -fsS localhost:14501/healthz
+          curl -fsS localhost:14501/status.json | grep -q '"id":"T2CI"' \
+            || { echo "::error::status.json did not identify the server"; exit 1; }
+
+      # A container that cannot stop cleanly is one an operator learns to `kill -9`, and
+      # then every restart drops the station positions that would have been saved.
+      - name: It stops cleanly
+        run: |
+          docker stop --timeout 15 aprsr-ci
+          code=$(docker inspect -f '{{.State.ExitCode}}' aprsr-ci)
+          docker logs aprsr-ci
+          test "$code" = "0" \
+            || { echo "::error::exited $code rather than shutting down cleanly"; exit 1; }
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f aprsr-ci || true

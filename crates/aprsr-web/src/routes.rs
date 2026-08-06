@@ -122,6 +122,50 @@ pub async fn status_json(state: web::Data<ServerState>) -> impl Responder {
         .json(Status::capture(&state))
 }
 
+/// `GET /static/{name}` — one of the dashboard's built assets, from inside the binary.
+///
+/// Serving these from memory rather than from a directory is what makes the binary
+/// self-contained; see [`crate::assets`]. It also means there is no path to traverse, no
+/// symlink to follow and no `..` to normalise — the name is matched exactly against a list
+/// of four, and anything else is a 404.
+///
+/// Cached hard, and revalidated by `ETag`. The tag is derived from the bytes, so a rebuild
+/// invalidates it and nothing else does. `immutable` is deliberately *not* used: the names
+/// carry no content hash, so a browser that took it literally would keep a stale bundle
+/// until it evicted the entry on its own.
+#[get("/static/{name}")]
+pub async fn static_asset(request: HttpRequest, name: web::Path<String>) -> impl Responder {
+    let Some(asset) = crate::assets::find(&name) else {
+        return HttpResponse::NotFound()
+            .content_type("text/plain; charset=utf-8")
+            .body("no such asset\n");
+    };
+
+    let etag = crate::assets::etag();
+    let unchanged = request
+        .headers()
+        .get(actix_web::http::header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        // `If-None-Match` may carry several tags, separated by commas.
+        .is_some_and(|presented| presented.split(',').any(|tag| tag.trim() == etag));
+
+    if unchanged {
+        return HttpResponse::NotModified()
+            .insert_header(("etag", etag))
+            .finish();
+    }
+
+    HttpResponse::Ok()
+        .content_type(asset.content_type)
+        .insert_header(("etag", etag))
+        .insert_header(("cache-control", "public, max-age=3600"))
+        // The assets are CSS and JavaScript and are always served as such. Without this a
+        // browser may sniff the content type, which is the mechanism behind a whole family
+        // of bugs that have nothing to do with this server.
+        .insert_header(("x-content-type-options", "nosniff"))
+        .body(asset.bytes)
+}
+
 /// `GET /healthz` — a liveness probe that touches no shared state beyond the config.
 #[get("/healthz")]
 pub async fn healthz(state: web::Data<ServerState>) -> impl Responder {

@@ -43,6 +43,15 @@ printf 'user N0CALL pass -1 vers demo 0.1 filter r/60/25/100\r\n' | nc localhost
 
 and open <http://localhost:14501/> for the dashboard.
 
+Or in a container — Docker or Podman, the `Dockerfile` needs no BuildKit:
+
+```bash
+docker build -t aprsr .
+docker compose up -d
+```
+
+[`docs/deploy.md`](docs/deploy.md) covers that, plus systemd, launchd and Windows.
+
 ### Migrating from aprsc
 
 ```bash

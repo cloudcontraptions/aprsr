@@ -9,6 +9,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A container.** A multi-stage `Dockerfile` and a `compose.yaml`, using no BuildKit-only
+  features so `podman build` reads the same file — deliberate, because rootless Podman is
+  often the only runtime installed on the kind of host an APRS-IS server ends up on. Debian
+  slim rather than distroless: `libsqlite3-sys` links a C library, and distroless would add a
+  variable to every future dependency change for an image size that is not the constraint
+  here.
+
+  CI builds it and then *runs* it: starts the container, waits for it to become healthy, logs
+  in over TCP from outside it, fetches `status.json`, and checks it stops with exit 0 rather
+  than being killed. A Dockerfile that compiles but produces an image which cannot start is
+  exactly what a build-only job misses and exactly what an operator hits first. The image is
+  not published anywhere; build it yourself.
+
+  New `aprsr healthcheck`, which probes `/healthz` and exits non-zero if it is not answering.
+  It exists so a container `HEALTHCHECK` does not have to install curl for one line, and it
+  reads the address from the configuration so the probe and the server cannot disagree about
+  the port.
+
+  New `docs/deploy.md` covers the container, a systemd unit, a launchd plist and Windows
+  service guidance — including the TOML backslash trap that makes
+  `run_dir = "C:\ProgramData\aprsr"` not the path it looks like.
 - **Access control and rate limiting**, in an `[access]` section rather than the separate
   `.acl` files aprsc uses — one file that describes the whole server is easier to review and
   to keep in version control than a `.conf` naming four files nobody remembers the contents
@@ -183,6 +204,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The dashboard's assets now work on any machine.** They were read from
+  `CARGO_MANIFEST_DIR/static` at runtime — an absolute path baked in at compile time, which
+  resolves exactly once: on the machine that built the binary, with the source tree still
+  there. Move the binary anywhere else — `cargo install`, an `scp` to a server, a container
+  built in one stage and run in another — and every asset 404s while the HTML renders
+  perfectly, so the dashboard comes up unstyled with nothing in the log to say why.
+
+  They are compiled into the binary now, which removes the failure mode rather than
+  documenting it, and drops the `actix-files` dependency along with the whole question of
+  path traversal: the name is matched against a list of four and there is no filesystem
+  behind it. Responses carry an `ETag` derived from the contents, so a rebuild invalidates a
+  browser cache and nothing else does.
+
+  Found while writing the `Dockerfile`, which is the shortest possible description of why
+  the container was worth building.
 - **A packet relayed by a station other than its source is no longer downgraded.** aprsr
   applied the q algorithm's `qAR`/`qAr` → `qAo` and `qAS`/`qAC` → `qAO` rules to every
   verified connection. The specification gates them on the packet having "entered the server

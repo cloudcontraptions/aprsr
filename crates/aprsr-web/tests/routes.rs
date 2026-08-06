@@ -809,3 +809,139 @@ async fn the_station_count_is_capped_and_the_total_reported() {
     assert_eq!(json["returned"], 10);
     assert_eq!(json["matched"], 50, "the client can say 10 of 50");
 }
+
+// --- embedded assets ------------------------------------------------------------------
+
+/// The dashboard's assets used to be read from an absolute build-time path, which works
+/// exactly once: on the machine that compiled the binary, with the source tree still there.
+/// They are compiled in now, so these serve from wherever the binary happens to be.
+#[actix_web::test]
+async fn every_asset_is_served_with_its_own_content_type() {
+    for (name, expected) in [
+        ("app.css", "text/css"),
+        ("app.js", "text/javascript"),
+        ("map.css", "text/css"),
+        ("map.js", "text/javascript"),
+    ] {
+        let app = actix_web::test::init_service(
+            actix_web::App::new().configure(aprsr_web::configure(state())),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::get()
+            .uri(&format!("/static/{name}"))
+            .to_request();
+        let response = actix_web::test::call_service(&app, request).await;
+
+        assert!(response.status().is_success(), "{name} was not served");
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            content_type.starts_with(expected),
+            "{name} served as {content_type}"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-content-type-options")
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff")
+        );
+
+        let body = actix_web::test::read_body(response).await;
+        assert!(!body.is_empty(), "{name} was empty");
+    }
+}
+
+/// There is no filesystem behind `/static`, and a request that looks like a path must not
+/// find one — nor reach anything but the four names.
+#[actix_web::test]
+async fn an_unknown_asset_is_not_found() {
+    for name in ["nothing.css", "..%2FCargo.toml", "APP.CSS", "app.css.map"] {
+        let body_status = {
+            let app = actix_web::test::init_service(
+                actix_web::App::new().configure(aprsr_web::configure(state())),
+            )
+            .await;
+            let request = actix_web::test::TestRequest::get()
+                .uri(&format!("/static/{name}"))
+                .to_request();
+            actix_web::test::call_service(&app, request).await.status()
+        };
+        assert_eq!(
+            body_status,
+            actix_web::http::StatusCode::NOT_FOUND,
+            "{name} resolved to something"
+        );
+    }
+}
+
+/// A browser that already has the bundle should be told so rather than sent 250 KB again.
+#[actix_web::test]
+async fn a_matching_etag_answers_not_modified() {
+    let app = actix_web::test::init_service(
+        actix_web::App::new().configure(aprsr_web::configure(state())),
+    )
+    .await;
+
+    let first = actix_web::test::call_service(
+        &app,
+        actix_web::test::TestRequest::get()
+            .uri("/static/app.css")
+            .to_request(),
+    )
+    .await;
+    let etag = first
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .expect("an ETag")
+        .to_owned();
+
+    let second = actix_web::test::call_service(
+        &app,
+        actix_web::test::TestRequest::get()
+            .uri("/static/app.css")
+            .insert_header(("if-none-match", etag.clone()))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        second.status(),
+        actix_web::http::StatusCode::NOT_MODIFIED,
+        "a matching ETag resent the whole asset"
+    );
+    assert!(actix_web::test::read_body(second).await.is_empty());
+
+    // A stale tag gets the asset.
+    let third = actix_web::test::call_service(
+        &app,
+        actix_web::test::TestRequest::get()
+            .uri("/static/app.css")
+            .insert_header(("if-none-match", "\"0000000000000000\""))
+            .to_request(),
+    )
+    .await;
+    assert!(third.status().is_success());
+    assert!(!actix_web::test::read_body(third).await.is_empty());
+}
+
+/// The dashboard references these by name; if a template and the asset list disagree, the
+/// page comes up unstyled and nothing says why.
+#[actix_web::test]
+async fn the_dashboard_only_references_assets_that_exist() {
+    let body = body_of(state(), "/").await;
+    for reference in body.split("/static/").skip(1) {
+        let name: String = reference
+            .chars()
+            .take_while(|c| *c != '"' && *c != '\'' && *c != '?')
+            .collect();
+        assert!(
+            aprsr_web::assets::find(&name).is_some(),
+            "the page references /static/{name}, which is not embedded"
+        );
+    }
+}
