@@ -37,6 +37,8 @@ struct DashboardTemplate {
     version: &'static str,
     /// The operator's notice, inserted as raw HTML. See `http.motd_file`.
     motd: Option<String>,
+    /// Whether to load the map bundle. Only this page has one.
+    map: bool,
     /// Pre-rendered fragments, so the first paint is complete and the HTMX polls reuse
     /// exactly the same markup.
     summary_html: String,
@@ -90,6 +92,7 @@ pub async fn dashboard(state: web::Data<ServerState>) -> impl Responder {
         server_id: status.server.id,
         version: aprsr_server::VERSION,
         motd: read_motd(&state),
+        map: true,
         summary_html,
         listeners_html,
         clients_html,

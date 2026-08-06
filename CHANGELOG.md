@@ -33,6 +33,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   anything changed. The panels keep a slow timer as a fallback, so a browser without
   `EventSource` — or a proxy that will not hold a streaming response — still updates, and the
   page still works with JavaScript off entirely.
+- **A station map** on the dashboard, plotting what this server has actually heard. The tile
+  server comes from `/config.json` rather than the bundle, so a closed network can point it
+  elsewhere — or set `http.map_tile_url = ""` and have stations drawn on a plain background
+  with nothing leaving the browser at all.
 - **History sparklines** over the last six hours, drawn from `/api/history`, and
   **`GET /api/stations`** for plotting heard stations with a bounding box and a cap.
 - **Live streams, metrics and counter history.** `GET /events/status` pushes a snapshot a

@@ -37,3 +37,20 @@
     transition: none;
   }
 }
+
+/*
+ * Station markers on the map are `divIcon`s carrying a glyph rather than Leaflet's default
+ * image markers — see `src/ts/leaflet-adapter.ts`. Centring is done here because Leaflet
+ * positions the icon's box, not whatever is inside it.
+ */
+.aprsr-marker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  font-size: 14px;
+  line-height: 1;
+  /* A dark halo, so a glyph stays readable over both water and land. */
+  text-shadow: 0 0 3px var(--color-slate-950), 0 0 2px var(--color-slate-950);
+}

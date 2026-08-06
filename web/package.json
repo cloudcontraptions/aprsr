@@ -6,20 +6,24 @@
   "license": "MIT OR Apache-2.0",
   "type": "module",
   "scripts": {
-    "build": "npm run build:css && npm run build:js && npm run build:site",
+    "build": "npm run build:css && npm run build:js && npm run build:map && npm run build:site",
     "build:css": "tailwindcss --input src/css/app.css --output ../crates/aprsr-web/static/app.css --minify",
     "build:js": "esbuild src/ts/dashboard.ts --bundle --minify --format=iife --target=es2022 --outfile=../crates/aprsr-web/static/app.js",
+    "build:map": "esbuild src/ts/map-entry.ts --bundle --minify --format=iife --target=es2022 --loader:.png=dataurl --loader:.svg=dataurl --outfile=../crates/aprsr-web/static/map.js",
     "build:site": "tailwindcss --input src/css/site.css --output ../www/dist/site.css --minify && node scripts/copy-site.mjs",
     "watch:css": "tailwindcss --input src/css/app.css --output ../crates/aprsr-web/static/app.css --watch",
     "watch:js": "esbuild src/ts/dashboard.ts --bundle --format=iife --target=es2022 --outfile=../crates/aprsr-web/static/app.js --watch",
+    "watch:map": "esbuild src/ts/map-entry.ts --bundle --format=iife --target=es2022 --loader:.png=dataurl --loader:.svg=dataurl --outfile=../crates/aprsr-web/static/map.js --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
-    "htmx.org": "2.0.10"
+    "htmx.org": "2.0.10",
+    "leaflet": "1.9.4"
   },
   "devDependencies": {
     "@tailwindcss/cli": "4.3.3",
+    "@types/leaflet": "1.9.22",
     "esbuild": "0.28.1",
     "tailwindcss": "4.3.3",
     "typescript": "7.0.2",

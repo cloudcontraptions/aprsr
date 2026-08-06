@@ -25,7 +25,8 @@ Update this file in the same change that moves an item.
   rather than stalling the server.
 - **Persistence** — SQLite via SeaORM: station positions (loaded at start, saved every
   minute and at shutdown), connection log, sampled counters with pruning.
-- **Web** — server-rendered dashboard kept live with HTMX, `status.json`, `/healthz`.
+- **Web** — server-rendered dashboard driven by the status stream rather than timers, with
+  history sparklines and a station map; `status.json`, `/healthz`.
 - **Observability** — server-sent event streams for status and for the live packet feed,
   `/metrics` in Prometheus text format, and `/api/history` over the sampled counters.
 - **Operations** — `run`, `check-config`, `convert-config`, `passcode`; graceful shutdown on
@@ -75,5 +76,9 @@ recognised, but nothing consults them yet.
 
 - **Rewriting packets beyond the q construct.** APRS-IS relays payloads verbatim, and
   aprsr will not start editing them.
-- **A built-in map.** Plenty of good clients already do this; `status.json` is there for
-  anyone who wants to build one.
+Previously listed here and since reversed: **a built-in map**. The reasoning was that plenty
+of good clients already plot APRS stations, which is true — but they plot *the network*, and
+none of them answers the question an operator actually has, which is what *this server* is
+hearing. That is a different question, and the dashboard is where it belongs. Tiles come from
+a configurable server, and setting `http.map_tile_url = ""` draws stations on a plain
+background and contacts nobody, so the feature does not force a closed network to open.

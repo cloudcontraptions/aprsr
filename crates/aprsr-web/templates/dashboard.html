@@ -20,6 +20,25 @@
 </section>
 
 <!--
+  The station map. Filled in by src/ts/map-entry.ts, which is a separate bundle because
+  Leaflet is as large again as everything else the page loads and only this panel needs it.
+  The tile server comes from /config.json rather than the bundle, so a closed network can
+  point it elsewhere — or empty it, and contact nobody at all.
+-->
+<section id="map" class="mt-8">
+  <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
+    Stations heard
+  </h2>
+  <div
+    data-map
+    class="h-96 w-full rounded-lg border border-slate-800/70 bg-slate-900/40 text-sm text-slate-500"
+  >
+    <p class="p-4">The map needs JavaScript. Station positions are at
+      <a class="text-slate-400 hover:text-sky-400" href="/api/stations">/api/stations</a>.</p>
+  </div>
+</section>
+
+<!--
   History charts. Filled in by src/ts/charts.ts from /api/history; the empty state below is
   what a reader sees with JavaScript off, which is honest rather than a broken-looking gap.
 -->

@@ -130,7 +130,7 @@ mod tests {
     #[test]
     fn the_built_assets_are_committed() {
         let dir = static_dir();
-        for asset in ["app.css", "app.js"] {
+        for asset in ["app.css", "app.js", "map.css", "map.js"] {
             let path = dir.join(asset);
             assert!(
                 path.is_file(),
