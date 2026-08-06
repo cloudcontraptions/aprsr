@@ -128,17 +128,19 @@ impl Heard {
             // A station gated by several IGates is normal and all of them should be able to
             // deliver a reply. Only the cap bounds it.
             if claims.len() >= MAX_CLIENTS_PER_STATION {
-                // Drop the least recent, which is the least likely still to reach the
+                // Replace the least recent, which is the least likely still to reach the
                 // station. `min_by_key` over a list this short is cheaper than keeping it
                 // sorted on every packet.
-                if let Some(oldest) = claims
-                    .iter_mut()
-                    .min_by_key(|claim| claim.at)
-                    .filter(|oldest| oldest.at <= now)
-                {
+                //
+                // The list never grows past the cap from here, including when the clock has
+                // gone backwards and every existing claim is stamped in the future. Falling
+                // through to `push` in that case would make the one structure on this path
+                // that is supposed to be bounded grow without limit, for a reason nobody
+                // would connect to a clock adjustment.
+                if let Some(oldest) = claims.iter_mut().min_by_key(|claim| claim.at) {
                     *oldest = Claim { client, at: now };
-                    return;
                 }
+                return;
             }
             claims.push(Claim { client, at: now });
             return;
@@ -401,6 +403,25 @@ mod tests {
         }
         assert_eq!(
             heard.clients_for("OH7LZB-1", NOW + 100).len(),
+            MAX_CLIENTS_PER_STATION
+        );
+    }
+
+    /// The cap holds even when every existing claim is stamped in the future, which is what
+    /// a clock adjustment looks like from in here. This is the one structure on the packet
+    /// path that is supposed to be bounded, and growing without limit for a reason nobody
+    /// would connect to a clock change is exactly the failure the cap exists to prevent.
+    #[test]
+    fn the_cap_holds_when_the_clock_has_gone_backwards() {
+        let heard = Heard::default();
+        for id in 0..(MAX_CLIENTS_PER_STATION as u64) {
+            heard.record("OH7LZB-1", ClientId(id), NOW + 10_000);
+        }
+        for id in 100..140 {
+            heard.record("OH7LZB-1", ClientId(id), NOW);
+        }
+        assert_eq!(
+            heard.clients_for("OH7LZB-1", NOW).len(),
             MAX_CLIENTS_PER_STATION
         );
     }
