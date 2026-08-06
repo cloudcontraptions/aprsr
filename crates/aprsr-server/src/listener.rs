@@ -266,19 +266,25 @@ id = "T2TEST"
         let listener = bind_tcp("[::]:0".parse().expect("valid address"), false).expect("binds");
         let port = listener.local_addr().expect("has an address").port();
 
-        // Nothing is listening on 127.0.0.1:port, so the connection is refused rather than
-        // hanging. A short timeout keeps the test honest if some platform accepts it.
+        // The claim is that the IPv4 client does not get in. *How* it fails to get in is a
+        // platform detail and must not be asserted: with nothing listening on the IPv4
+        // address, Linux and macOS reset the connection and `connect` returns
+        // `ECONNREFUSED` immediately, while Windows leaves the SYN unanswered so `connect`
+        // sits retrying until its own timeout. Silence is a refusal too.
+        //
+        // The timeout is therefore an outcome rather than a failure, and it is still bounded
+        // so that a genuine hang cannot wedge the suite.
         let attempt = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             tokio::net::TcpStream::connect(("127.0.0.1", port)),
         )
-        .await
-        .expect("the attempt resolved rather than hanging");
+        .await;
 
-        assert!(
-            attempt.is_err(),
-            "a v6-only listener must not accept IPv4 connections"
-        );
+        match attempt {
+            // Reset by the kernel (Linux, macOS), or never answered at all (Windows).
+            Ok(Err(_)) | Err(_) => {}
+            Ok(Ok(_stream)) => panic!("a v6-only listener must not accept IPv4 connections"),
+        }
     }
 
     /// An IPv4 bind is unaffected by the dual-stack setting, which has no meaning for it.

@@ -129,7 +129,16 @@ impl TestServer {
 
     /// Wait until the uplink has completed its handshake and joined the registry.
     async fn uplink_connected(&self) {
-        wait_until("the uplink to come up", || {
+        self.uplink_connected_within(READ_TIMEOUT).await;
+    }
+
+    /// As [`TestServer::uplink_connected`], with an explicit limit.
+    ///
+    /// Needed by the failover test, where the time to come up legitimately includes however
+    /// long the *first*, unreachable address takes to give up — and that is a platform
+    /// difference, not a constant. See the comment at its call site.
+    async fn uplink_connected_within(&self, limit: Duration) {
+        wait_until_within(limit, "the uplink to come up", || {
             self.state.uplinks.connected() == 1
         })
         .await;
@@ -218,15 +227,20 @@ impl TestClient {
 ///
 /// Never a sleep: the uplink handshake finishes on its own schedule, and a fixed wait would
 /// be both slower than it needs to be and unreliable on a loaded CI runner.
-async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
-    let deadline = tokio::time::Instant::now() + READ_TIMEOUT;
+async fn wait_until(what: &str, condition: impl FnMut() -> bool) {
+    wait_until_within(READ_TIMEOUT, what, condition).await;
+}
+
+/// [`wait_until`] with an explicit limit.
+async fn wait_until_within(limit: Duration, what: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + limit;
     loop {
         if condition() {
             return;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "timed out after {READ_TIMEOUT:?} waiting for {what}"
+            "timed out after {limit:?} waiting for {what}"
         );
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -640,7 +654,7 @@ address = "{second}"
 async fn an_unreachable_first_choice_falls_through_to_the_next() {
     let upstream = TestServer::start_with(UPSTREAM).await;
 
-    // A port that was bound and released, so connecting to it is refused rather than hanging.
+    // A port that was bound and released, so nothing is listening on it.
     let dead = {
         let socket = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -650,7 +664,15 @@ async fn an_unreachable_first_choice_falls_through_to_the_next() {
 
     let downstream =
         TestServer::start_with(&downstream_with_two(dead, upstream.addr("Full feed"))).await;
-    downstream.uplink_connected().await;
+
+    // Generous, because how long the dead address takes to give up is a platform difference
+    // rather than a constant: Linux and macOS reset the connection immediately, and a
+    // platform that leaves the SYN unanswered instead makes the supervisor wait out its own
+    // ten-second connect timeout before moving on. Both are correct, and the test is about
+    // what happens *after* — that the second choice takes over by itself.
+    downstream
+        .uplink_connected_within(Duration::from_secs(45))
+        .await;
 
     let uplinks = downstream.state.uplinks.all();
     let first = uplinks.first().cloned().expect("the first uplink");
