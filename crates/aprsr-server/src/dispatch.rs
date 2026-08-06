@@ -137,6 +137,16 @@ pub fn process(
 
     if dupecheck.check(&packet, now) {
         Metrics::incr(&state.metrics.packets_duplicate);
+        // A duplicate is not relayed, but it is not nothing either: it is the *only*
+        // evidence of how a transmission propagated, which is what a `dupefeed` port exists
+        // to show. Sent verbatim, with no q construct applied — the packet did not enter
+        // APRS-IS here and must not carry a claim that it did, and the whole point of the
+        // feed is to see the path the duplicate actually arrived with.
+        state.registry.broadcast_duplicate(
+            &ingest.line,
+            ingest.source.registry_id(),
+            &state.metrics,
+        );
         return Disposition::Duplicate;
     }
 
@@ -387,6 +397,56 @@ bind = "[::]:0"
         assert!(rx.try_recv().is_ok());
         assert!(rx.try_recv().is_err(), "only the first copy was delivered");
         assert_eq!(state.metrics.snapshot().packets_duplicate, 1);
+    }
+
+    /// The duplicate feed hangs off the same dispatch decision that suppressed the packet,
+    /// so this is the test that the two are actually wired together.
+    #[test]
+    fn a_suppressed_duplicate_reaches_a_dupefeed_client() {
+        let state = state();
+        let mut live = subscriber(&state);
+
+        let (tx, mut dupes) = mpsc::channel(8);
+        state.registry.insert(Registration {
+            callsign: "N0DUPE".into(),
+            remote: "192.0.2.3:3333".parse().expect("valid address"),
+            listener: "dupes".into(),
+            port_kind: PortKind::DupeFeed,
+            connection: crate::registry::ConnectionKind::Client,
+            software: None,
+            verified: true,
+            connected_at: 0,
+            session_id: None,
+            filter: FilterChain::default(),
+            filter_locked: false,
+            outbox: tx,
+        });
+
+        let mut dupecheck = DupeCheck::with_window(30);
+        let submission = ingest("N0CALL>APRS,TCPIP*:>beacon", "N0CALL");
+
+        // The first copy is relayed to the live feed and not to the duplicate feed.
+        assert!(process(&submission, &mut dupecheck, &state, 1_000).was_delivered());
+        assert!(live.try_recv().is_ok());
+        assert!(
+            dupes.try_recv().is_err(),
+            "the first copy is not a duplicate"
+        );
+
+        // The second is suppressed, and goes the other way.
+        assert_eq!(
+            process(&submission, &mut dupecheck, &state, 1_010),
+            Disposition::Duplicate
+        );
+        assert!(
+            live.try_recv().is_err(),
+            "a duplicate reached the live feed"
+        );
+        assert_eq!(
+            dupes.try_recv().as_deref(),
+            Ok("N0CALL>APRS,TCPIP*:>beacon"),
+            "the duplicate arrives exactly as it was submitted"
+        );
     }
 
     #[test]

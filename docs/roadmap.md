@@ -28,6 +28,8 @@ Update this file in the same change that moves an item.
   feed delivery to a client whose login carried `UDP <port>`.
 - **Access control** — CIDR allow and deny lists with longest-prefix matching, a callsign
   blocklist, and a per-client token-bucket rate limit on submissions.
+- **`dupefeed` ports** — the packets duplicate detection suppressed, delivered verbatim to
+  the clients that asked for them.
 - **Dispatch** — single ingest task, bounded per-client queues, slow clients drop packets
   rather than stalling the server.
 - **Persistence** — SQLite via SeaORM: station positions (loaded at start, saved every
@@ -64,8 +66,6 @@ onto `&[u8]`, which touches every parser in `aprsr-core`.
 
 ## Later
 
-- **`dupefeed` ports** — the port kind is configurable and clients on it currently receive
-  nothing. Delivering the packets duplicate detection dropped needs a second fan-out path.
 - **Server-to-server messaging** — APRS messages addressed to the server itself
   (aprsc's `messaging.c`).
 - **`t/n` NWS matching** — a heuristic over callsign prefixes; see `protocol.md`.

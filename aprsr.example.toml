@@ -110,7 +110,9 @@ status_bind = "0.0.0.0:14501"
 # kind is one of:
 #   fullfeed  — everything, after duplicate filtering; clients cannot set filters
 #   igate     — client and IGate port with user-defined filters
-#   dupefeed  — the packets duplicate detection dropped, for diagnostics
+#   dupefeed  — the packets duplicate detection suppressed, for diagnostics. Delivered
+#               verbatim and unfiltered: no q construct is applied, because the packet did
+#               not enter APRS-IS here and the path it arrived with is the whole point
 #   udpsubmit — packet submission only, nothing is sent back
 #
 # "[::]" accepts both IPv6 and IPv4 connections, on every platform aprsr supports — it

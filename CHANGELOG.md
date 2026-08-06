@@ -30,6 +30,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   New `docs/deploy.md` covers the container, a systemd unit, a launchd plist and Windows
   service guidance — including the TOML backslash trap that makes
   `run_dir = "C:\ProgramData\aprsr"` not the path it looks like.
+- **`dupefeed` ports deliver.** The port kind has been configurable since the first release
+  and clients on it received nothing. A duplicate is not relayed onto APRS-IS, but it is not
+  nothing: it is the *only* evidence of how a transmission propagated — which IGates heard
+  it, and by what path — and that is the question the port exists to answer.
+
+  Delivered verbatim, with no q construct applied: the packet did not enter APRS-IS here and
+  must not carry a claim that it did, and the path it arrived with is the data. No filters
+  either — filtering a diagnostic by the same rules as the live feed would hide exactly the
+  copies somebody is looking for. Uplinks never receive duplicates, because a duplicate
+  crossing a server boundary arrives at the far end as a fresh packet and gets relayed, which
+  is the loop duplicate detection exists to break.
+
+  The registry keeps a count of `dupefeed` clients so the check on the duplicate path is one
+  relaxed load. Duplicates are around a tenth of everything a busy server receives, and
+  scanning the registry per duplicate would cost more than the fan-out it avoids.
 - **Access control and rate limiting**, in an `[access]` section rather than the separate
   `.acl` files aprsc uses — one file that describes the whole server is easier to review and
   to keep in version control than a `.conf` naming four files nobody remembers the contents

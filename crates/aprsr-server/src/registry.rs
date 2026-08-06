@@ -117,6 +117,17 @@ impl Client {
     pub fn try_send(&self, line: Arc<str>) -> bool {
         self.outbox.try_send(line).is_ok()
     }
+
+    /// Whether this connection wants the packets duplicate detection suppressed.
+    ///
+    /// True only for a client of a `dupefeed` port. An uplink never is: a duplicate crossing
+    /// a server boundary would arrive at the far end as a fresh packet and be relayed, which
+    /// is precisely the loop duplicate detection exists to break.
+    #[must_use]
+    pub const fn wants_duplicates(&self) -> bool {
+        matches!(self.connection, ConnectionKind::Client)
+            && matches!(self.port_kind, PortKind::DupeFeed)
+    }
 }
 
 /// How a new client should be registered.
@@ -142,6 +153,14 @@ pub struct Registration {
 pub struct ClientRegistry {
     clients: DashMap<ClientId, Arc<Client>>,
     next_id: AtomicU64,
+    /// How many clients are on a `dupefeed` port.
+    ///
+    /// Kept as a counter rather than derived by scanning, because it is read on the
+    /// *duplicate* path — which on a busy server is ten percent of everything arriving. A
+    /// scan of the map per duplicate would cost more than the fan-out it is trying to avoid.
+    /// Almost every server has no dupefeed port at all, and this makes that case one relaxed
+    /// load and nothing else, the same way `publish_packet` handles the live feed.
+    dupefeed_clients: AtomicU64,
 }
 
 impl ClientRegistry {
@@ -169,13 +188,23 @@ impl ClientRegistry {
             filter_locked: registration.filter_locked,
             outbox: registration.outbox,
         });
+        if client.wants_duplicates() {
+            self.dupefeed_clients.fetch_add(1, Ordering::Relaxed);
+        }
         self.clients.insert(id, Arc::clone(&client));
         client
     }
 
     /// Remove a client.
     pub fn remove(&self, id: ClientId) -> Option<Arc<Client>> {
-        self.clients.remove(&id).map(|(_, client)| client)
+        let removed = self.clients.remove(&id).map(|(_, client)| client);
+        if removed
+            .as_ref()
+            .is_some_and(|client| client.wants_duplicates())
+        {
+            self.dupefeed_clients.fetch_sub(1, Ordering::Relaxed);
+        }
+        removed
     }
 
     #[must_use]
@@ -263,6 +292,51 @@ impl ClientRegistry {
                 Metrics::incr(&metrics.packets_dropped_slow);
             }
         }
+    }
+}
+
+impl ClientRegistry {
+    /// Deliver a packet that duplicate detection suppressed, to `dupefeed` clients only.
+    ///
+    /// A duplicate is not relayed, but it is not nothing: it is the only evidence of how a
+    /// transmission propagated — which IGates heard it, and by what path — and that is the
+    /// question a `dupefeed` port exists to answer. Three properties matter:
+    ///
+    /// * **Verbatim.** No q construct is applied. The packet did not enter APRS-IS here and
+    ///   must not carry a claim that it did, and the path it arrived with is the data.
+    /// * **No filters.** A `dupefeed` client is a diagnostic tool; filtering the diagnostic
+    ///   by the same rules as the live feed would hide exactly the copies being looked for.
+    /// * **Nothing when nobody is listening.** The check below is one relaxed load, so a
+    ///   server with no such port pays that and no allocation on every duplicate.
+    pub fn broadcast_duplicate(&self, line: &str, origin: Option<ClientId>, metrics: &Metrics) {
+        if self.dupefeed_clients.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+
+        let rendered: Arc<str> = Arc::from(line);
+        let bytes = rendered.len() as u64 + 2;
+
+        for entry in &self.clients {
+            let client = entry.value();
+            if !client.wants_duplicates() || Some(client.id) == origin {
+                continue;
+            }
+            if client.try_send(Arc::clone(&rendered)) {
+                Metrics::incr(&client.counters.packets_sent);
+                Metrics::add(&client.counters.bytes_sent, bytes);
+                Metrics::incr(&metrics.packets_sent);
+                Metrics::add(&metrics.bytes_sent, bytes);
+            } else {
+                Metrics::incr(&client.counters.packets_dropped);
+                Metrics::incr(&metrics.packets_dropped_slow);
+            }
+        }
+    }
+
+    /// How many clients are watching the duplicate feed. For the dashboard and for tests.
+    #[must_use]
+    pub fn dupefeed_clients(&self) -> u64 {
+        self.dupefeed_clients.load(Ordering::Relaxed)
     }
 }
 
@@ -554,6 +628,143 @@ mod tests {
         assert_eq!(registry.len(), 2, "both are in the registry");
         assert_eq!(registry.clients().len(), 1, "only one is a client");
         assert_eq!(registry.snapshot().len(), 2);
+    }
+
+    // --- the duplicate feed -------------------------------------------------------------
+
+    const DUPLICATE: &str = "OH7LZB>APRS,WIDE1-1,OH2RCH-10*,qAR,OH2RCH-10:>heard twice";
+
+    fn broadcast_duplicate(registry: &ClientRegistry, metrics: &Metrics, raw: &str) {
+        registry.broadcast_duplicate(raw, None, metrics);
+    }
+
+    /// A duplicate is the only evidence of how a transmission propagated, which is the
+    /// question a `dupefeed` port exists to answer.
+    #[test]
+    fn a_dupefeed_client_receives_suppressed_duplicates() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (r, mut rx) = registration("dupes", PortKind::DupeFeed, "");
+        registry.insert(r);
+        assert_eq!(registry.dupefeed_clients(), 1);
+
+        broadcast_duplicate(&registry, &metrics, DUPLICATE);
+        assert_eq!(rx.try_recv().as_deref(), Ok(DUPLICATE));
+    }
+
+    /// Verbatim: no q construct, no rewriting. The packet did not enter APRS-IS here, and
+    /// the path it arrived with is the whole point of looking at it.
+    #[test]
+    fn a_duplicate_is_delivered_exactly_as_it_arrived() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (r, mut rx) = registration("dupes", PortKind::DupeFeed, "");
+        registry.insert(r);
+
+        broadcast_duplicate(&registry, &metrics, DUPLICATE);
+        let delivered = rx.try_recv().expect("delivered");
+        assert_eq!(delivered.as_ref(), DUPLICATE);
+        assert!(!delivered.contains("T2TEST"), "no construct was applied");
+    }
+
+    /// A `dupefeed` client is a diagnostic tool. Filtering the diagnostic by the same rules
+    /// as the live feed would hide exactly the copies somebody is looking for.
+    #[test]
+    fn a_dupefeed_client_gets_everything_regardless_of_its_filter() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (r, mut rx) = registration("dupes", PortKind::DupeFeed, "b/N0SPAM");
+        registry.insert(r);
+
+        broadcast_duplicate(&registry, &metrics, DUPLICATE);
+        assert_eq!(rx.try_recv().as_deref(), Ok(DUPLICATE));
+    }
+
+    /// Nobody else does. A duplicate reaching an ordinary client would be the duplicate
+    /// detection failing to do its job.
+    #[test]
+    fn no_other_port_kind_receives_a_duplicate() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (full, mut full_rx) = registration("full", PortKind::FullFeed, "");
+        let (igate, mut igate_rx) = registration("igate", PortKind::Igate, "t/p");
+        let (mut uplink, mut uplink_rx) = registration("Core", PortKind::FullFeed, "");
+        uplink.connection = ConnectionKind::Uplink { transmit: true };
+        let (dupes, mut dupes_rx) = registration("dupes", PortKind::DupeFeed, "");
+        registry.insert(full);
+        registry.insert(igate);
+        registry.insert(uplink);
+        registry.insert(dupes);
+
+        broadcast_duplicate(&registry, &metrics, DUPLICATE);
+
+        assert!(full_rx.try_recv().is_err(), "a full feed got a duplicate");
+        assert!(
+            igate_rx.try_recv().is_err(),
+            "an igate client got a duplicate"
+        );
+        assert!(
+            uplink_rx.try_recv().is_err(),
+            "a duplicate went upstream, where it would be relayed as fresh"
+        );
+        assert!(dupes_rx.try_recv().is_ok());
+    }
+
+    /// The live feed and the duplicate feed are separate paths and must not cross.
+    #[test]
+    fn a_dupefeed_client_receives_nothing_from_the_live_feed() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (r, mut rx) = registration("dupes", PortKind::DupeFeed, "");
+        registry.insert(r);
+
+        broadcast(&registry, &metrics, BEACON);
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// The counter is what keeps the duplicate path free on a server with no such port —
+    /// the common case, and the one where duplicates are ten percent of all traffic.
+    #[test]
+    fn a_server_with_no_dupefeed_port_does_no_work_per_duplicate() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (r, mut rx) = registration("full", PortKind::FullFeed, "");
+        registry.insert(r);
+        assert_eq!(registry.dupefeed_clients(), 0);
+
+        broadcast_duplicate(&registry, &metrics, DUPLICATE);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(metrics.snapshot().packets_sent, 0);
+    }
+
+    /// The count has to come back down, or a server that once had a dupefeed client keeps
+    /// paying for the fan-out forever.
+    #[test]
+    fn the_dupefeed_count_follows_connections_both_ways() {
+        let registry = ClientRegistry::new();
+        let (r, _rx) = registration("dupes", PortKind::DupeFeed, "");
+        let client = registry.insert(r);
+        assert_eq!(registry.dupefeed_clients(), 1);
+
+        registry.remove(client.id);
+        assert_eq!(registry.dupefeed_clients(), 0);
+
+        // A second removal of the same id must not take it negative.
+        registry.remove(client.id);
+        assert_eq!(registry.dupefeed_clients(), 0);
+    }
+
+    /// A duplicate submitted by a dupefeed client is not sent back to it, for the same
+    /// reason the live feed skips its source.
+    #[test]
+    fn the_source_of_a_duplicate_is_skipped() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (r, mut rx) = registration("dupes", PortKind::DupeFeed, "");
+        let client = registry.insert(r);
+
+        registry.broadcast_duplicate(DUPLICATE, Some(client.id), &metrics);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
