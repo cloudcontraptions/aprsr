@@ -141,7 +141,7 @@ pub(crate) async fn run(path: &Path) -> Result<()> {
         .with_context(|| format!("could not open the database at {}", config.database.url))?;
     tracing::info!(url = %config.database.url, "database ready");
 
-    let server = Server::bind(Arc::clone(&config), Some(store.clone()))
+    let server = Server::bind_from(Arc::clone(&config), Some(store.clone()), Some(path))
         .await
         .context("could not start the server")?;
     let state = server.state();
@@ -153,7 +153,7 @@ pub(crate) async fn run(path: &Path) -> Result<()> {
     );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    tokio::spawn(watch_for_signals(shutdown_tx));
+    tokio::spawn(watch_for_signals(shutdown_tx, Arc::clone(&state)));
 
     let web_task = config.http.status_bind.map(|address| {
         let state = Arc::clone(&state);
@@ -193,20 +193,65 @@ async fn wait_for_shutdown(mut rx: watch::Receiver<bool>) {
     }
 }
 
-/// Set the shutdown flag when the operating system asks aprsr to stop.
+/// Act on operating-system signals until one of them says to stop.
 ///
-/// Which signals that means is [`crate::signals`]'s problem; this only has to act on the
-/// answer.
-async fn watch_for_signals(tx: watch::Sender<bool>) {
-    let Some(signal) = signals::next_shutdown_signal().await else {
-        tracing::warn!("no shutdown signal could be listened for; stop aprsr by closing it");
-        return;
-    };
+/// Which signals exist on this platform is [`crate::signals`]'s problem; this only acts on
+/// the answer. It loops rather than handling one signal because a reload leaves the server
+/// running, so there will be more.
+async fn watch_for_signals(tx: watch::Sender<bool>, state: Arc<ServerState>) {
+    let mut signals = signals::Signals::install();
 
-    match signal.action() {
-        SignalAction::Shutdown => {
-            tracing::info!(%signal, "shutting down");
-            let _ = tx.send(true);
+    loop {
+        let Some(signal) = signals.next().await else {
+            tracing::warn!("no signal could be listened for; stop aprsr by closing it");
+            return;
+        };
+
+        match signal.action() {
+            SignalAction::Shutdown => {
+                tracing::info!(%signal, "shutting down");
+                let _ = tx.send(true);
+                return;
+            }
+            SignalAction::Reload => {
+                tracing::info!(%signal, "re-reading the configuration");
+                report_reload(&state);
+            }
+        }
+    }
+}
+
+/// Re-read the configuration and log the outcome.
+///
+/// Shared by the signal path and the admin endpoint so both behave identically — an
+/// operator on Windows, where there is no SIGHUP, gets the same result over HTTP.
+pub(crate) fn report_reload(state: &ServerState) {
+    match state.reload() {
+        Ok(report) if report.is_empty() => {
+            tracing::info!("configuration re-read; nothing changed");
+        }
+        Ok(report) => {
+            for change in &report.applied {
+                tracing::info!(
+                    setting = change.setting,
+                    from = %change.from,
+                    to = %change.to,
+                    "applied"
+                );
+            }
+            for change in &report.requires_restart {
+                tracing::warn!(
+                    setting = change.setting,
+                    running = %change.from,
+                    in_file = %change.to,
+                    "changed in the file but needs a restart; still running the old value"
+                );
+            }
+        }
+        Err(error) => {
+            // Nothing was changed, so the server carries on with what it had. That is the
+            // whole point of validating before swapping.
+            tracing::error!(%error, "the configuration was not reloaded");
         }
     }
 }

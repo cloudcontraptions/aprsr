@@ -77,6 +77,53 @@ bind = "{bind}"
     assert_eq!(listener.wants_dual_stack(), expected);
 }
 
+// --- the administrative token --------------------------------------------------------
+
+/// Closed by default. The status port has no other authentication, so an endpoint that
+/// changes server state must not be reachable merely because the port is.
+#[rstest]
+#[case(None, "anything", false)] // nothing configured: nothing is accepted
+#[case(None, "", false)] // not even the empty string
+#[case(Some("s3cret"), "s3cret", true)]
+#[case(Some("s3cret"), "wrong", false)]
+#[case(Some("s3cret"), "s3cre", false)] // a prefix is not a match
+#[case(Some("s3cret"), "s3crett", false)] // nor is an extension
+#[case(Some("s3cret"), "S3CRET", false)] // and it is case-sensitive
+#[case(Some("s3cret"), "", false)]
+fn the_admin_token_is_closed_by_default_and_matched_exactly(
+    #[case] configured: Option<&str>,
+    #[case] presented: &str,
+    #[case] expected: bool,
+) {
+    let http = Http {
+        status_bind: None,
+        admin_token: configured.map(ToOwned::to_owned),
+    };
+    assert_eq!(http.admin_token_matches(presented), expected);
+}
+
+#[test]
+fn the_admin_token_is_read_from_the_configuration() {
+    let config = Config::from_toml(
+        r#"
+[server]
+id = "N0CALL-1"
+
+[http]
+admin_token = "s3cret"
+
+[[listen]]
+name = "Client-Defined Filters"
+kind = "igate"
+bind = "[::]:14580"
+"#,
+    )
+    .expect("valid");
+
+    assert!(config.http.admin_token_matches("s3cret"));
+    assert!(!config.http.admin_token_matches("nope"));
+}
+
 #[test]
 fn loads_a_full_configuration() {
     let config = Config::from_toml(

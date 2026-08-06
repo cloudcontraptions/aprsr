@@ -146,6 +146,41 @@ pub struct Http {
     /// Address for the status dashboard and JSON API.
     #[serde(default)]
     pub status_bind: Option<SocketAddr>,
+    /// Shared secret required by the endpoints that change server state.
+    ///
+    /// Unset — the default — disables those endpoints entirely rather than leaving them
+    /// open. The status interface has no other authentication, so an endpoint that can
+    /// re-read configuration must not be reachable simply because the port is.
+    ///
+    /// Prefer supplying this through the environment (`APRSR_HTTP__ADMIN_TOKEN`) rather
+    /// than writing it into the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_token: Option<String>,
+}
+
+impl Http {
+    /// Whether a presented token matches the configured one.
+    ///
+    /// False whenever no token is configured, so the administrative endpoints are closed by
+    /// default rather than open by default.
+    ///
+    /// The comparison is length-then-bytes in constant time for its length, so a caller
+    /// cannot learn the token one character at a time from response timing. This matters
+    /// more than it looks: the endpoint is unauthenticated except for this check.
+    #[must_use]
+    pub fn admin_token_matches(&self, presented: &str) -> bool {
+        let Some(expected) = self.admin_token.as_deref() else {
+            return false;
+        };
+        if expected.len() != presented.len() {
+            return false;
+        }
+        expected
+            .bytes()
+            .zip(presented.bytes())
+            .fold(0u8, |differences, (a, b)| differences | (a ^ b))
+            == 0
+    }
 }
 
 /// What a listening port accepts.

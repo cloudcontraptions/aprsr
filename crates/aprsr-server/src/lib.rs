@@ -23,6 +23,7 @@ pub mod limits;
 pub mod listener;
 pub mod metrics;
 pub mod registry;
+pub mod reload;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -99,9 +100,22 @@ impl Shutdown {
 /// Everything shared between the packet path and the web interface.
 #[derive(Debug)]
 pub struct ServerState {
-    pub config: Arc<Config>,
+    /// The configuration in force.
+    ///
+    /// Behind a lock because it can be replaced by a reload while the server is running.
+    /// Read it through [`ServerState::config`], which hands back an `Arc` so callers hold a
+    /// consistent snapshot rather than a lock.
+    config: std::sync::RwLock<Arc<Config>>,
+    /// Where the configuration was loaded from, so a reload can re-read it.
+    ///
+    /// `None` when the configuration was not loaded from a file — every test, and the
+    /// environment-only case — in which case there is nothing to reload from.
+    config_path: Option<std::path::PathBuf>,
     /// This server's callsign, hoisted out of the config because the q algorithm needs it
     /// for every packet.
+    ///
+    /// Deliberately not re-read on reload: `server.id` is classified as requiring a
+    /// restart, precisely so this stays fixed for the life of the process.
     pub server_id: Arc<str>,
     pub metrics: Arc<Metrics>,
     pub registry: Arc<ClientRegistry>,
@@ -117,7 +131,8 @@ impl ServerState {
     pub fn new(config: Arc<Config>, store: Option<Store>) -> Self {
         Self {
             server_id: Arc::from(config.server.id.as_str()),
-            config,
+            config: std::sync::RwLock::new(config),
+            config_path: None,
             metrics: Arc::new(Metrics::new()),
             registry: Arc::new(ClientRegistry::new()),
             positions: Arc::new(PositionCache::new()),
@@ -126,11 +141,73 @@ impl ServerState {
         }
     }
 
+    /// Record where the configuration came from, enabling reload.
+    #[must_use]
+    pub fn with_config_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.config_path = Some(path.into());
+        self
+    }
+
+    /// The configuration currently in force.
+    ///
+    /// A poisoned lock cannot happen — nothing panics while holding it — but a server
+    /// should not die of one either, so the last-known configuration is rebuilt from the
+    /// poison rather than unwrapped.
+    #[must_use]
+    pub fn config(&self) -> Arc<Config> {
+        match self.config.read() {
+            Ok(guard) => Arc::clone(&guard),
+            Err(poisoned) => Arc::clone(&poisoned.into_inner()),
+        }
+    }
+
+    /// Re-read the configuration file and adopt what a running server can adopt.
+    ///
+    /// Returns what changed and what could not be applied. Settings that require a restart
+    /// keep their running value; see [`reload::compare`] for the classification and the
+    /// reasoning behind each entry.
+    ///
+    /// Errors only if the file cannot be read or is invalid — in which case nothing is
+    /// changed at all. A reload must never leave the server running a half-applied
+    /// configuration.
+    pub fn reload(&self) -> Result<reload::ReloadReport, ReloadError> {
+        let path = self.config_path.as_ref().ok_or(ReloadError::NoConfigFile)?;
+        let fresh = Config::load(path).map_err(|source| ReloadError::Invalid {
+            path: path.clone(),
+            source: Box::new(source),
+        })?;
+
+        let current = self.config();
+        let report = reload::compare(&current, &fresh);
+
+        // Swap unconditionally even when only restart-required settings changed: the file
+        // is then the record of what an operator asked for, and the next restart picks it
+        // up without them having to remember to edit it again.
+        if let Ok(mut guard) = self.config.write() {
+            *guard = Arc::new(fresh);
+        }
+
+        Ok(report)
+    }
+
     /// How long the server has been running, in seconds.
     #[must_use]
     pub fn uptime_secs(&self) -> u64 {
         now_secs().saturating_sub(self.started_at)
     }
+}
+
+/// Why a configuration reload could not happen.
+#[derive(Debug, thiserror::Error)]
+pub enum ReloadError {
+    #[error("this server was not started from a configuration file, so there is nothing to reload")]
+    NoConfigFile,
+    #[error("{path} is not a valid configuration, so nothing was changed: {source}")]
+    Invalid {
+        path: std::path::PathBuf,
+        #[source]
+        source: Box<aprsr_config::ConfigError>,
+    },
 }
 
 /// A bound, not-yet-accepting server.
@@ -146,8 +223,24 @@ impl Server {
     /// When a store is supplied, known station positions are loaded into the cache so
     /// `m/` and `f/` filters work from the first packet rather than after a warm-up.
     pub async fn bind(config: Arc<Config>, store: Option<Store>) -> Result<Self, ServerError> {
+        Self::bind_from(config, store, None).await
+    }
+
+    /// Bind, remembering which file the configuration came from.
+    ///
+    /// Only a server that knows its own configuration file can reload it. Tests and
+    /// environment-only configurations pass `None` and simply cannot reload, which
+    /// [`ServerState::reload`] reports rather than pretending to succeed.
+    pub async fn bind_from(
+        config: Arc<Config>,
+        store: Option<Store>,
+        config_path: Option<&std::path::Path>,
+    ) -> Result<Self, ServerError> {
         let listeners = listener::bind_all(&config)?;
         let mut state = ServerState::new(Arc::clone(&config), store);
+        if let Some(path) = config_path {
+            state = state.with_config_path(path);
+        }
 
         if let Some(store) = state.store.as_ref() {
             match store.load_positions().await {
@@ -199,7 +292,7 @@ impl Server {
 
         let (dispatcher, dispatch_task) = Dispatcher::spawn(
             Arc::clone(&self.state),
-            self.state.config.limits.client_queue,
+            self.state.config().limits.client_queue,
         );
 
         let mut accept_tasks = Vec::with_capacity(self.listeners.len());

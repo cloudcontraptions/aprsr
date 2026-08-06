@@ -314,3 +314,167 @@ async fn an_unknown_path_is_a_404() {
     let response = get!(state(), "/nonexistent");
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+// --- administration ---------------------------------------------------------------------
+
+/// A state whose configuration came from a real file, so it can actually be reloaded.
+///
+/// Returns the temporary directory too: dropping it deletes the file, and a reload of a
+/// file that no longer exists is a different test.
+fn state_from_file(config: &str) -> (Arc<ServerState>, tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("aprsr.toml");
+    std::fs::write(&path, config).expect("writes the configuration");
+
+    let loaded = Config::load(&path).expect("valid test configuration");
+    let state = ServerState::new(Arc::new(loaded), None).with_config_path(&path);
+    (Arc::new(state), dir, path)
+}
+
+async fn post_reload(
+    state: Arc<ServerState>,
+    token: Option<&str>,
+) -> actix_web::dev::ServiceResponse {
+    let app = test::init_service(App::new().configure(aprsr_web::configure(state))).await;
+    let mut request = test::TestRequest::post().uri("/admin/reload");
+    if let Some(token) = token {
+        request = request.insert_header(("x-aprsr-admin-token", token));
+    }
+    test::call_service(&app, request.to_request()).await
+}
+
+const WITH_TOKEN: &str = r#"
+[server]
+id = "T2TEST"
+
+[http]
+admin_token = "s3cret-token"
+
+[[listen]]
+name = "Clients"
+kind = "igate"
+bind = "127.0.0.1:14580"
+"#;
+
+/// The status port has no other authentication, so an endpoint that changes server state
+/// must be closed unless a token was deliberately configured.
+#[actix_web::test]
+async fn reloading_without_a_configured_token_is_refused() {
+    let (state, _dir, _path) = state_from_file(CONFIG);
+    let response = post_reload(state, Some("anything")).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[actix_web::test]
+async fn reloading_without_presenting_the_token_is_refused() {
+    let (state, _dir, _path) = state_from_file(WITH_TOKEN);
+    let response = post_reload(state, None).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[actix_web::test]
+async fn reloading_with_the_wrong_token_is_refused() {
+    let (state, _dir, _path) = state_from_file(WITH_TOKEN);
+    let response = post_reload(state, Some("not-the-token")).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// The whole point: change a setting on disk, reload over HTTP, and have the running
+/// server report it as adopted.
+#[actix_web::test]
+async fn reloading_with_the_token_applies_the_new_configuration() {
+    let (state, _dir, path) = state_from_file(WITH_TOKEN);
+    assert_eq!(state.config().server.admin, "");
+
+    std::fs::write(
+        &path,
+        WITH_TOKEN.replace(
+            "id = \"T2TEST\"",
+            "id = \"T2TEST\"\nadmin = \"Someone, N0CALL\"",
+        ),
+    )
+    .expect("rewrites the configuration");
+
+    let app =
+        test::init_service(App::new().configure(aprsr_web::configure(Arc::clone(&state)))).await;
+    let request = test::TestRequest::post()
+        .uri("/admin/reload")
+        .insert_header(("x-aprsr-admin-token", "s3cret-token"))
+        .to_request();
+    let body = test::call_and_read_body(&app, request).await;
+    let json: serde_json::Value =
+        serde_json::from_slice(&body).expect("the reload response is JSON");
+
+    assert_eq!(json["needs_restart"], false);
+    assert_eq!(json["applied"][0]["setting"], "server.admin");
+    assert_eq!(
+        state.config().server.admin,
+        "Someone, N0CALL",
+        "the running server adopted the change"
+    );
+}
+
+/// A setting that cannot be adopted must be reported, not silently ignored — and the
+/// server must still be running the old value afterwards.
+#[actix_web::test]
+async fn a_change_that_needs_a_restart_is_reported_and_not_applied() {
+    let (state, _dir, path) = state_from_file(WITH_TOKEN);
+
+    std::fs::write(&path, WITH_TOKEN.replace("T2TEST", "T2OTHER"))
+        .expect("rewrites the configuration");
+
+    let app =
+        test::init_service(App::new().configure(aprsr_web::configure(Arc::clone(&state)))).await;
+    let request = test::TestRequest::post()
+        .uri("/admin/reload")
+        .insert_header(("x-aprsr-admin-token", "s3cret-token"))
+        .to_request();
+    let body = test::call_and_read_body(&app, request).await;
+    let json: serde_json::Value =
+        serde_json::from_slice(&body).expect("the reload response is JSON");
+
+    assert_eq!(json["needs_restart"], true);
+    assert_eq!(json["requires_restart"][0]["setting"], "server.id");
+    assert_eq!(
+        state.server_id.as_ref(),
+        "T2TEST",
+        "the q construct identity does not change under a running server"
+    );
+
+    // And the status page must agree with the server rather than with the file. Reporting
+    // the pending identity would tell an operator the server is something it is not, and
+    // disagree with the q construct every other station on the network is seeing.
+    let reported = body_of(state, "/status.json").await;
+    let status: serde_json::Value = serde_json::from_str(&reported).expect("status.json");
+    assert_eq!(
+        status["server"]["id"], "T2TEST",
+        "status.json reports the running identity, not the one waiting for a restart"
+    );
+}
+
+/// An invalid file must change nothing at all. A server left half-configured would be
+/// worse than one that refused.
+#[actix_web::test]
+async fn an_invalid_configuration_changes_nothing() {
+    let (state, _dir, path) = state_from_file(WITH_TOKEN);
+    std::fs::write(&path, "this is not valid TOML {{{").expect("writes nonsense");
+
+    let response = post_reload(Arc::clone(&state), Some("s3cret-token")).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        state.config().server.id,
+        "T2TEST",
+        "the previous configuration is still in force"
+    );
+}
+
+/// A server started without a configuration file has nothing to re-read, and says so
+/// rather than reporting a successful reload that did nothing.
+#[actix_web::test]
+async fn reloading_a_server_with_no_configuration_file_is_refused() {
+    let config = Config::from_toml(WITH_TOKEN).expect("valid test configuration");
+    let state = Arc::new(ServerState::new(Arc::new(config), None));
+
+    let response = post_reload(state, Some("s3cret-token")).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}

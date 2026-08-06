@@ -79,8 +79,11 @@ impl Status {
         let now = aprsr_server::now_secs();
         let clients = state.registry.snapshot();
 
-        let listeners = state
-            .config
+        // One snapshot for the whole capture: a reload part-way through would otherwise
+        // produce a status page describing two different configurations at once.
+        let config = state.config();
+
+        let listeners = config
             .visible_listeners()
             .map(|listener| ListenerInfo {
                 name: listener.name.clone(),
@@ -99,11 +102,16 @@ impl Status {
 
         Self {
             server: ServerInfo {
-                id: state.config.server.id.clone(),
+                // The identity actually in force, not whatever the configuration file
+                // currently says. `server.id` requires a restart to change, so after a
+                // reload that edited it the file and the running server disagree — and the
+                // status page must report the server, which is what other stations see in
+                // the q construct of every packet it relays.
+                id: state.server_id.to_string(),
                 software: aprsr_server::SOFTWARE_NAME,
                 software_version: aprsr_server::VERSION,
-                admin: state.config.server.admin.clone(),
-                email: state.config.server.email.clone(),
+                admin: config.server.admin.clone(),
+                email: config.server.email.clone(),
                 started_at: state.started_at,
                 uptime_secs: state.uptime_secs(),
                 now,

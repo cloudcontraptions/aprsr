@@ -162,7 +162,7 @@ impl Dispatcher {
     #[must_use]
     pub fn spawn(state: Arc<ServerState>, queue_depth: usize) -> (Self, JoinHandle<()>) {
         let (tx, mut rx) = mpsc::channel::<Ingest>(queue_depth.max(1));
-        let window = state.config.limits.dupecheck_window.as_secs();
+        let window = state.config().limits.dupecheck_window.as_secs();
 
         let handle = tokio::spawn(async move {
             let mut dupecheck = DupeCheck::with_window(window);

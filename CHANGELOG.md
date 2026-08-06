@@ -21,6 +21,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   hard limit is lower than the configured value aprsr requests the most it can get and
   warns; Windows has no equivalent per-process limit and says so.
 - **`dual_stack` on a listener**, for an IPv6 port that should accept IPv6 only.
+- **Configuration reload without dropping clients**, via `SIGHUP` or
+  `POST /admin/reload`. Both go through the same code path, so a Windows operator — where
+  there is no `SIGHUP` — gets identical behaviour over HTTP.
+
+  A reload reports what it did. Settings the running server can adopt are applied and
+  logged; settings it cannot, such as `server.id` or a listener's bind address, are named
+  along with the value still in force, rather than being silently dropped. An invalid file
+  changes nothing at all, so a typo cannot leave a server half-configured.
+
+  The administrative endpoints require `http.admin_token` and are disabled entirely when it
+  is unset, because the status interface has no other authentication.
 
 ### Fixed
 

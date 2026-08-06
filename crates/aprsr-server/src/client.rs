@@ -201,7 +201,7 @@ async fn register(
     )
     .await;
 
-    let (outbox, outbox_rx) = mpsc::channel::<Arc<str>>(state.config.limits.client_queue.max(1));
+    let (outbox, outbox_rx) = mpsc::channel::<Arc<str>>(state.config().limits.client_queue.max(1));
     let client = state.registry.insert(Registration {
         callsign: Arc::clone(callsign),
         remote: peer,
@@ -309,7 +309,7 @@ async fn write_feed(
     state: Arc<ServerState>,
     mut shutdown: Shutdown,
 ) {
-    let period = state.config.limits.keepalive_interval.as_duration();
+    let period = state.config().limits.keepalive_interval.as_duration();
     let mut keepalive = tokio::time::interval(period.max(Duration::from_secs(1)));
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The first tick fires immediately; the client has just had the banner and logresp.
@@ -367,7 +367,7 @@ async fn read_submissions(
     dispatcher: &Dispatcher,
     mut shutdown: Shutdown,
 ) {
-    let timeout = state.config.limits.client_timeout.as_duration();
+    let timeout = state.config().limits.client_timeout.as_duration();
 
     loop {
         let next = tokio::select! {

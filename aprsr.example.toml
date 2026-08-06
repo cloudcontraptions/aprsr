@@ -60,6 +60,27 @@ url = "sqlite://data/aprsr.sqlite?mode=rwc"
 # The status dashboard and JSON API. Comment out to disable the web interface.
 status_bind = "0.0.0.0:14501"
 
+# Shared secret for the endpoints that change server state — currently just
+# `POST /admin/reload`, which re-reads this file without disconnecting anyone.
+#
+# Unset, as it is here, those endpoints are disabled entirely rather than left open: the
+# status interface has no other authentication, so anything that can reach the port could
+# otherwise reconfigure the server.
+#
+# Prefer the environment over this file, so the secret is not sitting in configuration:
+#
+#     APRSR_HTTP__ADMIN_TOKEN=$(openssl rand -hex 32)
+#
+# Then, to reload:
+#
+#     curl -XPOST -H "X-Aprsr-Admin-Token: $APRSR_HTTP__ADMIN_TOKEN" \
+#          http://localhost:14501/admin/reload
+#
+# On Unix, `kill -HUP <pid>` does the same thing and needs no token. Windows has no
+# equivalent signal, which is why this endpoint exists.
+#
+# admin_token = "generate-something-random"
+
 # --- Listening ports ----------------------------------------------------------------
 #
 # kind is one of:

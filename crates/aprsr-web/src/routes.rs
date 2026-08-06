@@ -1,21 +1,29 @@
 //! HTTP routes.
 //!
-//! Three kinds of endpoint: the dashboard page, the HTMX fragments that keep it live, and
-//! `status.json` for anything machine-readable. All of them render from the same
-//! [`Status`] snapshot.
+//! Four kinds of endpoint: the dashboard page, the HTMX fragments that keep it live,
+//! `status.json` for anything machine-readable — all of which render from the same
+//! [`Status`] snapshot — and the administrative endpoints, which change server state and
+//! are therefore the only ones that require a credential.
 
 // Actix's route macros replace each handler with a generated struct of the same name and
 // keep the function as an inner item, which `unreachable_pub` then flags. The handlers are
 // reachable — through the generated struct.
 #![allow(unreachable_pub)]
 
-use actix_web::{HttpResponse, Responder, get, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use aprsr_server::ServerState;
 use askama::Template;
 use askama_web::WebTemplate;
 
 use crate::status::Status;
 use crate::view::{ClientRow, ListenerRow, Summary};
+
+/// Header carrying the administrative token.
+///
+/// `Authorization: Bearer <token>` is accepted too; this one exists because it is easier to
+/// send from a shell without quoting, and an operator reaching for `curl` at three in the
+/// morning should not have to think about it.
+const ADMIN_TOKEN_HEADER: &str = "x-aprsr-admin-token";
 
 /// The full dashboard page.
 #[derive(Debug, Template, WebTemplate)]
@@ -122,5 +130,102 @@ pub async fn fragment_clients(state: web::Data<ServerState>) -> impl Responder {
     let status = Status::capture(&state);
     ClientsTemplate {
         clients: ClientRow::from_status(&status),
+    }
+}
+
+// --- administration ---------------------------------------------------------------------
+
+/// Whether a request carries the configured administrative token.
+///
+/// Accepts either `X-Aprsr-Admin-Token: <token>` or `Authorization: Bearer <token>`.
+/// Returns false when no token is configured at all, which is what keeps these endpoints
+/// closed by default on a status port that has no other authentication.
+fn is_authorised(request: &HttpRequest, state: &ServerState) -> bool {
+    let config = state.config();
+
+    let presented = request
+        .headers()
+        .get(ADMIN_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| {
+            request
+                .headers()
+                .get(actix_web::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+        });
+
+    presented.is_some_and(|token| config.http.admin_token_matches(token))
+}
+
+/// What a reload did, as JSON.
+#[derive(Debug, serde::Serialize)]
+struct ReloadResponse {
+    /// Settings that changed and are now in force.
+    applied: Vec<ReloadChange>,
+    /// Settings that changed in the file but need a restart to take effect.
+    requires_restart: Vec<ReloadChange>,
+    /// Whether a restart is needed for the file to be fully in force.
+    needs_restart: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ReloadChange {
+    setting: &'static str,
+    from: String,
+    to: String,
+}
+
+impl From<&aprsr_server::reload::Change> for ReloadChange {
+    fn from(change: &aprsr_server::reload::Change) -> Self {
+        Self {
+            setting: change.setting,
+            from: change.from.clone(),
+            to: change.to.clone(),
+        }
+    }
+}
+
+/// `POST /admin/reload` — re-read the configuration file without dropping clients.
+///
+/// This is the cross-platform half of the reload capability. Unix operators can send
+/// `SIGHUP` instead and get exactly the same code path; Windows has no equivalent signal,
+/// so without this there would be no way to reconfigure a running server there at all.
+///
+/// Answers `409 Conflict` when the new file is invalid, because nothing was changed and the
+/// server is still running the previous configuration — that is a refusal, not a failure.
+#[post("/admin/reload")]
+pub async fn admin_reload(request: HttpRequest, state: web::Data<ServerState>) -> impl Responder {
+    if !is_authorised(&request, &state) {
+        // Deliberately terse. A caller without the token learns only that it was wrong,
+        // not whether one is configured or what the endpoint would have done.
+        return HttpResponse::Unauthorized()
+            .content_type("text/plain; charset=utf-8")
+            .body("an administrative token is required\n");
+    }
+
+    match state.reload() {
+        Ok(report) => {
+            tracing::info!(
+                applied = report.applied.len(),
+                requires_restart = report.requires_restart.len(),
+                "configuration re-read over HTTP"
+            );
+            HttpResponse::Ok().json(ReloadResponse {
+                applied: report.applied.iter().map(ReloadChange::from).collect(),
+                requires_restart: report
+                    .requires_restart
+                    .iter()
+                    .map(ReloadChange::from)
+                    .collect(),
+                needs_restart: report.needs_restart(),
+            })
+        }
+        Err(error) => {
+            tracing::warn!(%error, "a configuration reload was refused");
+            HttpResponse::Conflict()
+                .content_type("text/plain; charset=utf-8")
+                .body(format!("{error}\n"))
+        }
     }
 }

@@ -57,7 +57,8 @@ pub fn configure(state: Arc<ServerState>) -> impl Fn(&mut web::ServiceConfig) + 
             .service(routes::healthz)
             .service(routes::fragment_summary)
             .service(routes::fragment_listeners)
-            .service(routes::fragment_clients);
+            .service(routes::fragment_clients)
+            .service(routes::admin_reload);
     }
 }
 

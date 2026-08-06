@@ -29,6 +29,9 @@ Update this file in the same change that moves an item.
 - **Cross-platform** — built and tested on Linux, macOS and Windows in CI. Listener sockets
   set `IPV6_V6ONLY` explicitly so `[::]` means the same thing everywhere, and
   `limits.file_limit` raises the descriptor limit where the platform has one.
+- **Configuration reload** — `SIGHUP`, or `POST /admin/reload` behind a token, re-reads the
+  file without dropping clients. Settings a running server cannot adopt are named in the
+  response rather than silently ignored; an invalid file changes nothing at all.
 
 ## Next
 
