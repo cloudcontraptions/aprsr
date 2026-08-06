@@ -1,0 +1,11 @@
+---
+source: crates/aprsr-web/tests/routes.rs
+expression: top
+---
+[
+    "clients",
+    "listeners",
+    "server",
+    "stations_tracked",
+    "totals",
+]

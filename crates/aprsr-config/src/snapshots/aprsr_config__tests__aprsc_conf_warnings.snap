@@ -1,0 +1,8 @@
+---
+source: crates/aprsr-config/src/tests.rs
+expression: "rendered.join(\"\\n\")"
+---
+line 9: LogRotate not converted — aprsr logs to stdout; use your service manager's log rotation
+line 15: unnamed listener, generated the name "fullfeed udp 10152"
+line 23: HTTPUpload not converted — HTTP position upload is on the roadmap, not in this release
+line 26: MagicBadness not converted — this is aprsc's deliberate start-up tripwire and has no aprsr equivalent

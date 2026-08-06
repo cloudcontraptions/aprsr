@@ -1,0 +1,63 @@
+---
+source: crates/aprsr-config/src/tests.rs
+expression: "converted.config.to_toml().expect(\"serialises\")"
+---
+[server]
+id = "OH7LZB-1"
+passcode = 13023
+admin = "Someone Somewhere, N0CALL"
+email = "someone@example.com"
+run_dir = "data"
+
+[limits]
+client_timeout = "2d"
+upstream_timeout = "15s"
+dupecheck_window = "30s"
+keepalive_interval = "20s"
+file_limit = 10000
+client_queue = 1024
+
+[database]
+url = "sqlite://data/aprsr.sqlite?mode=rwc"
+
+[http]
+status_bind = "0.0.0.0:14501"
+
+[[listen]]
+name = "Full feed"
+kind = "fullfeed"
+protocol = "tcp"
+bind = "[::]:10152"
+hidden = true
+
+[[listen]]
+name = "fullfeed udp 10152"
+kind = "fullfeed"
+protocol = "udp"
+bind = "[::]:10152"
+hidden = true
+
+[[listen]]
+name = "Client-Defined Filters"
+kind = "igate"
+protocol = "tcp"
+bind = "[::]:14580"
+
+[[listen]]
+name = "350 km from my position"
+kind = "igate"
+protocol = "tcp"
+bind = "[::]:20350"
+filter = "m/350"
+max_clients = 500
+
+[[listen]]
+name = "UDP submit"
+kind = "udpsubmit"
+protocol = "udp"
+bind = "[::]:8080"
+
+[[uplink]]
+name = "Core rotate"
+kind = "full"
+address = "rotate.aprs.net:10152"

@@ -1,0 +1,71 @@
+name: Pages
+
+# Builds and publishes the aprsr.net landing page from www/.
+#
+# The site is deployed with an Actions workflow rather than "deploy from branch" so that
+# www/ can hold sources and share the Tailwind theme with the dashboard, while docs/ stays
+# free for developer documentation.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "www/**"
+      - "web/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel a deploy in flight; a half-published site is worse than a slow one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        working-directory: web
+        run: npm ci
+
+      # Writes www/dist/site.css and copies index.html, CNAME and assets alongside it.
+      - name: Build the site
+        working-directory: web
+        run: npm run build:site
+
+      # Losing CNAME from the artifact silently unsets the custom domain in Pages.
+      - name: The custom domain survived the build
+        run: |
+          test -f www/dist/CNAME || { echo "::error::www/dist/CNAME is missing"; exit 1; }
+          echo "custom domain: $(cat www/dist/CNAME)"
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: www/dist
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

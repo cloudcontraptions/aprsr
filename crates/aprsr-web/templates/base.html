@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title }} — aprsr</title>
+    <meta name="description" content="Status of the {{ server_id }} APRS-IS server." />
+    <link rel="stylesheet" href="/static/app.css" />
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body class="min-h-full bg-slate-950 text-slate-200 antialiased">
+    <header class="border-b border-slate-800 bg-slate-900/60">
+      <div class="mx-auto flex max-w-6xl flex-wrap items-baseline gap-x-4 gap-y-1 px-6 py-5">
+        <h1 class="text-xl font-semibold tracking-tight text-slate-100">
+          <span class="text-sky-400">aprsr</span>
+          <span class="font-mono text-base text-slate-400">{{ server_id }}</span>
+        </h1>
+        <p class="text-sm text-slate-400">APRS-IS server</p>
+        <div class="ml-auto flex items-center gap-2 text-xs text-slate-500">
+          <span
+            id="live-indicator"
+            class="inline-block h-2 w-2 rounded-full bg-emerald-500"
+            title="Updating"
+          ></span>
+          <span data-live-label>live</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="mx-auto max-w-6xl px-6 py-8">{% block content %}{% endblock %}</main>
+
+    <footer class="mx-auto max-w-6xl px-6 pb-10 text-xs leading-relaxed text-slate-500">
+      <p>
+        <a class="text-slate-400 hover:text-sky-400" href="https://aprsr.net">aprsr</a>
+        is an APRS-IS server written in Rust.
+        Its architecture follows
+        <a
+          class="text-slate-400 hover:text-sky-400"
+          href="https://github.com/hessu/aprsc"
+          >aprsc</a
+        >
+        by Heikki Hannikainen (OH7LZB) and Matti Aarnio, with thanks.
+      </p>
+      <p class="mt-1">
+        <a class="text-slate-400 hover:text-sky-400" href="/status.json">status.json</a>
+        · aprsr {{ version }}
+      </p>
+    </footer>
+  </body>
+</html>

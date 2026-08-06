@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>aprsr — an APRS-IS server in Rust</title>
+    <meta
+      name="description"
+      content="aprsr is an open-source APRS-IS server written in Rust: protocol-complete packet handling, server-side filters, and a live status dashboard."
+    />
+    <link rel="canonical" href="https://aprsr.net/" />
+    <link rel="stylesheet" href="/site.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📡</text></svg>"
+    />
+    <meta property="og:title" content="aprsr — an APRS-IS server in Rust" />
+    <meta
+      property="og:description"
+      content="An open-source APRS-IS server written in Rust."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://aprsr.net/" />
+  </head>
+  <body class="min-h-full bg-slate-950 text-slate-300 antialiased">
+    <!-- Hero -->
+    <header class="border-b border-slate-800/80">
+      <div class="mx-auto max-w-4xl px-6 py-20 sm:py-28">
+        <p class="font-mono text-sm uppercase tracking-[0.2em] text-accent-400">
+          Amateur radio · APRS-IS
+        </p>
+        <h1
+          class="mt-4 text-4xl font-semibold tracking-tight text-slate-50 sm:text-5xl"
+        >
+          aprsr
+        </h1>
+        <p class="mt-4 max-w-2xl text-lg leading-relaxed text-slate-400">
+          An APRS-IS server written in Rust. It speaks the protocol amateur radio
+          operators have been running for decades — the login handshake, the q construct
+          algorithm, server-side filters, duplicate suppression — with a memory-safe
+          implementation and a status page you can actually read.
+        </p>
+
+        <div class="mt-8 flex flex-wrap gap-3">
+          <a
+            class="rounded-md bg-accent-500 px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-accent-400"
+            href="https://github.com/cloudcontraptions/aprsr"
+            >Source on GitHub</a
+          >
+          <a
+            class="rounded-md border border-slate-700 px-4 py-2 text-sm font-medium text-slate-300 transition hover:border-slate-500 hover:text-slate-100"
+            href="https://github.com/cloudcontraptions/aprsr#getting-started"
+            >Getting started</a
+          >
+        </div>
+
+        <p class="mt-6 text-sm text-slate-500">
+          Early days — the protocol core is implemented and tested, uplinks and TLS are
+          next. See the
+          <a
+            class="text-slate-400 underline decoration-slate-700 underline-offset-4 hover:text-accent-400"
+            href="https://github.com/cloudcontraptions/aprsr/blob/main/docs/roadmap.md"
+            >roadmap</a
+          >
+          for exactly what works today.
+        </p>
+      </div>
+    </header>
+
+    <main>
+      <!-- What it does -->
+      <section class="mx-auto max-w-4xl px-6 py-16">
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-slate-500">
+          What it does
+        </h2>
+        <div class="mt-6 grid gap-6 sm:grid-cols-2">
+          <article>
+            <h3 class="font-medium text-slate-100">Speaks APRS-IS properly</h3>
+            <p class="mt-2 text-sm leading-relaxed text-slate-400">
+              TNC2 framing with the 512-byte limit enforced, the full login handshake, and
+              the q construct algorithm including its loop-rejection rules. Every
+              behaviour is implemented from the published specification and cites it in
+              the source.
+            </p>
+          </article>
+          <article>
+            <h3 class="font-medium text-slate-100">Server-side filters</h3>
+            <p class="mt-2 text-sm leading-relaxed text-slate-400">
+              Range, area, prefix, budlist, object, type, symbol, digipeater, entry
+              station, group message, unproto, q construct, and the position-relative
+              <code class="font-mono text-slate-300">m/</code> and
+              <code class="font-mono text-slate-300">f/</code> — additive, negatable, and
+              parsed once per client rather than per packet.
+            </p>
+          </article>
+          <article>
+            <h3 class="font-medium text-slate-100">A dashboard worth opening</h3>
+            <p class="mt-2 text-sm leading-relaxed text-slate-400">
+              Live traffic counters, connected clients with their filters, and per-port
+              statistics. Server-rendered and kept current with HTMX, so it stays readable
+              with JavaScript disabled and costs almost nothing to serve.
+            </p>
+          </article>
+          <article>
+            <h3 class="font-medium text-slate-100">Migrates from aprsc</h3>
+            <p class="mt-2 text-sm leading-relaxed text-slate-400">
+              Point
+              <code class="font-mono text-slate-300">aprsr convert-config</code> at an
+              existing <code class="font-mono text-slate-300">aprsc.conf</code> and it
+              emits the equivalent TOML, reporting anything that did not survive the move
+              rather than dropping it silently.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <!-- Quick start -->
+      <section class="border-y border-slate-800/80 bg-slate-900/30">
+        <div class="mx-auto max-w-4xl px-6 py-16">
+          <h2 class="text-sm font-semibold uppercase tracking-wide text-slate-500">
+            Try it
+          </h2>
+          <pre
+            class="transcript mt-6 overflow-x-auto rounded-lg border border-slate-800 bg-slate-950/70 p-5 text-slate-300"
+          ><code><span class="prompt">git clone https://github.com/cloudcontraptions/aprsr</span>
+<span class="prompt">cd aprsr</span>
+<span class="prompt">cp aprsr.example.toml aprsr.toml</span>
+<span class="comment"># set server.id to your own callsign, then:</span>
+<span class="prompt">cargo run -p aprsr -- run --config aprsr.toml</span>
+
+<span class="comment"># in another terminal — connect as a client</span>
+<span class="prompt">printf 'user N0CALL pass -1 vers demo 0.1 filter r/60/25/100\r\n' | nc localhost 14580</span>
+
+<span class="comment"># and the dashboard</span>
+<span class="prompt">open http://localhost:14501/</span></code></pre>
+          <p class="mt-4 text-sm text-slate-500">
+            You need a Rust toolchain; nothing else. The dashboard assets are committed, so
+            there is no Node build to run before the server looks right.
+          </p>
+        </div>
+      </section>
+
+      <!-- Credits -->
+      <section class="mx-auto max-w-4xl px-6 py-16">
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-slate-500">
+          Standing on the shoulders of aprsc
+        </h2>
+        <div class="mt-6 space-y-4 text-sm leading-relaxed text-slate-400">
+          <p>
+            aprsr would not exist without
+            <a
+              class="text-slate-200 underline decoration-slate-700 underline-offset-4 hover:text-accent-400"
+              href="https://github.com/hessu/aprsc"
+              >aprsc</a
+            >, the APRS-IS server in C by
+            <strong class="font-medium text-slate-300"
+              >Heikki Hannikainen (OH7LZB)</strong
+            >
+            and <strong class="font-medium text-slate-300">Matti Aarnio (OH2MQK)</strong>.
+            aprsc has carried the core of the APRS-IS network for well over a decade, and
+            its module decomposition — separating packet parsing, q construct handling,
+            duplicate detection, filtering, the client registry, and the incoming and
+            outgoing packet paths into distinct, individually testable units — is a
+            genuinely good design. aprsr's crate layout deliberately follows it. Our
+            thanks to the authors for publishing that design openly.
+          </p>
+          <p>
+            aprsr contains no aprsc source code. It is an independent implementation
+            written from the public APRS-IS specifications at
+            <a
+              class="text-slate-200 underline decoration-slate-700 underline-offset-4 hover:text-accent-400"
+              href="http://www.aprs-is.net/"
+              >aprs-is.net</a
+            >, with aprsc consulted as an architectural reference only. aprsc is
+            BSD-3-Clause; aprsr is MIT OR Apache-2.0, and that separation is maintained
+            deliberately.
+          </p>
+          <p>
+            APRS® was created by the late
+            <strong class="font-medium text-slate-300">Bob Bruninga, WB4APR</strong>
+            (1948–2022). The APRS-IS network and its protocol documentation are maintained
+            by Pete Loveall, AE5PL, and the wider APRS-IS community — thank you for
+            keeping the specifications public and precise enough to implement against.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="border-t border-slate-800/80">
+      <div
+        class="mx-auto flex max-w-4xl flex-wrap items-center gap-x-4 gap-y-2 px-6 py-8 text-xs text-slate-500"
+      >
+        <span>aprsr — MIT OR Apache-2.0</span>
+        <a
+          class="hover:text-accent-400"
+          href="https://github.com/cloudcontraptions/aprsr"
+          >GitHub</a
+        >
+        <a
+          class="hover:text-accent-400"
+          href="https://github.com/cloudcontraptions/aprsr/blob/main/docs/architecture.md"
+          >Architecture</a
+        >
+        <a
+          class="hover:text-accent-400"
+          href="https://github.com/cloudcontraptions/aprsr/blob/main/NOTICE"
+          >Attribution</a
+        >
+        <span class="ml-auto">Not affiliated with the APRS trademark holder.</span>
+      </div>
+    </footer>
+  </body>
+</html>

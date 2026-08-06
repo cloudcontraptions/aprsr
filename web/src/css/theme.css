@@ -1,0 +1,31 @@
+/*
+ * Design tokens shared by the aprsr dashboard and the aprsr.net landing page.
+ *
+ * Tailwind 4 is configured in CSS rather than JavaScript, so this file is the whole
+ * theme. Anything defined in `@theme` becomes a utility class as well as a variable.
+ */
+
+@theme {
+  /* The accent runs from the sky family: readable on the near-black background used by
+     both surfaces, and distinct from the emerald used for "healthy" indicators. */
+  --color-accent-400: oklch(0.746 0.16 232.661);
+  --color-accent-500: oklch(0.685 0.169 237.323);
+  --color-accent-600: oklch(0.588 0.158 241.966);
+
+  --font-mono:
+    ui-monospace, "SFMono-Regular", "SF Mono", "Menlo", "Consolas",
+    "Liberation Mono", monospace;
+
+  /* Callsigns, packets and filter expressions are all read character by character, so
+     they are set in mono at a slightly tighter tracking than prose. */
+  --tracking-callsign: 0.01em;
+}
+
+/*
+ * Packet and filter text: never wrap mid-token, and stay legible when a table scrolls.
+ */
+@utility packet {
+  font-family: var(--font-mono);
+  letter-spacing: var(--tracking-callsign);
+  white-space: nowrap;
+}

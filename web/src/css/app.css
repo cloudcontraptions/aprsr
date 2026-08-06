@@ -1,0 +1,32 @@
+/* Styles for the aprsr status dashboard. */
+
+@import "tailwindcss";
+@import "./theme.css";
+
+/* Tailwind 4 scans these for class names. The Askama templates live outside this
+   directory, so they have to be named explicitly. */
+@source "../../../crates/aprsr-web/templates/**/*.html";
+@source "../ts/**/*.ts";
+
+/*
+ * The live indicator reflects HTMX request state: solid when idle, dimmed while a poll is
+ * in flight, amber when a poll failed. Driven by `src/ts/live.ts`.
+ */
+#live-indicator {
+  transition: background-color 150ms ease-out, opacity 150ms ease-out;
+}
+
+#live-indicator[data-state="loading"] {
+  opacity: 0.4;
+}
+
+#live-indicator[data-state="error"] {
+  background-color: var(--color-amber-500);
+}
+
+/* Respect a reader who does not want motion. */
+@media (prefers-reduced-motion: reduce) {
+  #live-indicator {
+    transition: none;
+  }
+}

@@ -1,0 +1,99 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/aprsr",
+    "crates/aprsr-config",
+    "crates/aprsr-core",
+    "crates/aprsr-server",
+    "crates/aprsr-store",
+    "crates/aprsr-web",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/cloudcontraptions/aprsr"
+homepage = "https://aprsr.net"
+authors = ["The aprsr contributors"]
+
+[workspace.dependencies]
+aprsr-config = { version = "0.1.0", path = "crates/aprsr-config" }
+aprsr-core = { version = "0.1.0", path = "crates/aprsr-core" }
+aprsr-server = { version = "0.1.0", path = "crates/aprsr-server" }
+aprsr-store = { version = "0.1.0", path = "crates/aprsr-store" }
+aprsr-web = { version = "0.1.0", path = "crates/aprsr-web" }
+
+actix-files = "0.6.10"
+actix-web = "4.14"
+ahash = "0.8"
+anyhow = "1.0"
+askama = "0.16"
+askama_web = { version = "0.16", features = ["actix-web-4"] }
+clap = { version = "4.6", features = ["derive"] }
+dashmap = "6.1"
+figment = { version = "0.10", features = ["env", "toml"] }
+futures-util = "0.3"
+sea-orm = { version = "2.0", default-features = false, features = [
+    "macros",
+    "runtime-tokio-rustls",
+    "sqlx-sqlite",
+    "with-chrono",
+    "with-json",
+] }
+sea-orm-migration = { version = "2.0", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "sqlx-sqlite",
+    "with-chrono",
+] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+time = { version = "0.3", features = ["formatting", "macros"] }
+tokio = { version = "1.53", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+toml = "1.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Dev dependencies shared across the workspace.
+assert_cmd = "2.2"
+insta = { version = "1.48", features = ["json"] }
+predicates = "3.1"
+proptest = "1.11"
+rstest = "0.26"
+tempfile = "3.27"
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Pedantic lints that fight the grain of this codebase more than they help.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+# Protocol code does a lot of small integer conversion with values whose ranges
+# are already checked by the parsers; the casts are deliberate.
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+# Enforced hard: panicking paths have no place in a long-lived network server.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = "symbols"
+
+[profile.bench]
+debug = true

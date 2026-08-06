@@ -1,0 +1,41 @@
+<section
+  id="listeners"
+  class="mt-8"
+  hx-get="/fragments/listeners"
+  hx-trigger="every 15s"
+  hx-swap="outerHTML"
+>
+  <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-400">Ports</h2>
+
+  {% if listeners.is_empty() %}
+  <p class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-sm text-slate-500">
+    No ports are visible. Ports marked <code class="font-mono">hidden</code> in the
+    configuration do not appear here.
+  </p>
+  {% else %}
+  <div class="overflow-x-auto rounded-lg border border-slate-800">
+    <table class="min-w-full text-sm">
+      <thead class="bg-slate-900/70 text-left text-xs uppercase tracking-wide text-slate-500">
+        <tr>
+          <th class="px-4 py-2 font-medium">Name</th>
+          <th class="px-4 py-2 font-medium">Kind</th>
+          <th class="px-4 py-2 font-medium">Address</th>
+          <th class="px-4 py-2 font-medium">Clients</th>
+          <th class="px-4 py-2 font-medium">Forced filter</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-800/70">
+        {% for listener in listeners %}
+        <tr class="bg-slate-900/20">
+          <td class="px-4 py-2 text-slate-200">{{ listener.name }}</td>
+          <td class="px-4 py-2 text-slate-400">{{ listener.kind }}</td>
+          <td class="px-4 py-2 font-mono text-xs text-slate-400">{{ listener.bind }}</td>
+          <td class="px-4 py-2 font-mono text-slate-300">{{ listener.clients }}</td>
+          <td class="px-4 py-2 font-mono text-xs text-slate-400">{{ listener.filter }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>

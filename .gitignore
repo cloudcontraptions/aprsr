@@ -1,0 +1,33 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Node
+node_modules/
+npm-debug.log*
+.npm/
+
+# Landing page build output (produced by the Pages workflow)
+/www/dist/
+
+# Runtime state
+/data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Local configuration — copy aprsr.example.toml to aprsr.toml to get started
+/aprsr.toml
+
+# Snapshot review artifacts
+**/*.snap.new
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Note: crates/aprsr-web/static/ is intentionally NOT ignored. The built
+# dashboard assets are committed so `cargo run` works without a Node toolchain.

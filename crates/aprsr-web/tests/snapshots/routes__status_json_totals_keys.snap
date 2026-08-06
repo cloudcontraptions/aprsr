@@ -1,0 +1,18 @@
+---
+source: crates/aprsr-web/tests/routes.rs
+expression: totals
+---
+[
+    "bytes_received",
+    "bytes_sent",
+    "clients_connected",
+    "clients_total",
+    "logins_rejected",
+    "packets_dropped_slow",
+    "packets_duplicate",
+    "packets_invalid",
+    "packets_received",
+    "packets_rejected",
+    "packets_sent",
+    "packets_unverified",
+]

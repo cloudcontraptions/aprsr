@@ -1,0 +1,26 @@
+/* Styles for the aprsr.net landing page. */
+
+@import "tailwindcss";
+@import "./theme.css";
+
+@source "../../../www/index.html";
+
+/*
+ * The hero's terminal transcript. Rendered as a `<pre>` so it can be copied verbatim, but
+ * styled to read as a screenshot of a real session.
+ */
+.transcript {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.7;
+  tab-size: 2;
+}
+
+.transcript .prompt::before {
+  content: "$ ";
+  color: var(--color-accent-400);
+}
+
+.transcript .comment {
+  color: var(--color-slate-500);
+}

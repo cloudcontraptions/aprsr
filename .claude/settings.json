@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(cargo build:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo tree:*)",
+      "Bash(cargo insta:*)",
+      "Bash(cargo llvm-cov:*)",
+      "Bash(cargo metadata:*)",
+      "Bash(cargo deny:*)",
+      "Bash(make:*)",
+      "Bash(npm ci)",
+      "Bash(npm install)",
+      "Bash(npm run:*)",
+      "Bash(npm test:*)",
+      "Bash(npx tsc:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git add:*)",
+      "WebFetch(domain:www.aprs-is.net)",
+      "WebFetch(domain:aprs-is.net)",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:crates.io)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./data/**)",
+      "Read(./**/*.sqlite)"
+    ]
+  }
+}

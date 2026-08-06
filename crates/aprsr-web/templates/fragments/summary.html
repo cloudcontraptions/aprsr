@@ -1,0 +1,59 @@
+<section
+  id="summary"
+  hx-get="/fragments/summary"
+  hx-trigger="every 5s"
+  hx-swap="outerHTML"
+>
+  <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+    <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+      <p class="text-xs uppercase tracking-wide text-slate-500">Clients</p>
+      <p class="mt-1 font-mono text-2xl text-slate-100">{{ summary.clients_connected }}</p>
+      <p class="mt-1 text-xs text-slate-500">{{ summary.clients_total }} since start</p>
+    </div>
+    <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+      <p class="text-xs uppercase tracking-wide text-slate-500">Packets in</p>
+      <p class="mt-1 font-mono text-2xl text-slate-100">{{ summary.packets_received }}</p>
+      <p class="mt-1 text-xs text-slate-500">{{ summary.bytes_received }}</p>
+    </div>
+    <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+      <p class="text-xs uppercase tracking-wide text-slate-500">Packets out</p>
+      <p class="mt-1 font-mono text-2xl text-slate-100">{{ summary.packets_sent }}</p>
+      <p class="mt-1 text-xs text-slate-500">{{ summary.bytes_sent }}</p>
+    </div>
+    <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+      <p class="text-xs uppercase tracking-wide text-slate-500">Uptime</p>
+      <p class="mt-1 font-mono text-2xl text-slate-100">{{ summary.uptime }}</p>
+      <p class="mt-1 text-xs text-slate-500">{{ summary.software }}</p>
+    </div>
+  </div>
+
+  <div class="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+    <div class="rounded-lg border border-slate-800/70 bg-slate-900/30 px-4 py-3">
+      <p class="text-xs uppercase tracking-wide text-slate-500">Duplicates</p>
+      <p class="mt-1 font-mono text-lg text-slate-300">
+        {{ summary.packets_duplicate }}
+        <span class="text-sm text-slate-500">({{ summary.duplicate_share }})</span>
+      </p>
+    </div>
+    <div class="rounded-lg border border-slate-800/70 bg-slate-900/30 px-4 py-3">
+      <p class="text-xs uppercase tracking-wide text-slate-500">Malformed</p>
+      <p class="mt-1 font-mono text-lg text-slate-300">{{ summary.packets_invalid }}</p>
+    </div>
+    <div class="rounded-lg border border-slate-800/70 bg-slate-900/30 px-4 py-3">
+      <p class="text-xs uppercase tracking-wide text-slate-500">Loops rejected</p>
+      <p class="mt-1 font-mono text-lg text-slate-300">{{ summary.packets_rejected }}</p>
+    </div>
+    <div class="rounded-lg border border-slate-800/70 bg-slate-900/30 px-4 py-3">
+      <p class="text-xs uppercase tracking-wide text-slate-500">Stations tracked</p>
+      <p class="mt-1 font-mono text-lg text-slate-300">{{ summary.stations_tracked }}</p>
+    </div>
+  </div>
+
+  {% if !summary.admin.is_empty() %}
+  <p class="mt-3 text-xs text-slate-500">
+    Operated by {{ summary.admin }}{% if !summary.email.is_empty() %} ·
+    <a class="hover:text-sky-400" href="mailto:{{ summary.email }}">{{ summary.email }}</a>
+    {% endif %}
+  </p>
+  {% endif %}
+</section>

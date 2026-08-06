@@ -1,0 +1,54 @@
+aprsr — an APRS-IS server in Rust
+Copyright (c) 2026 The aprsr contributors
+
+This product is licensed under either of
+
+  * Apache License, Version 2.0 (see LICENSE-APACHE)
+  * MIT license (see LICENSE-MIT)
+
+at your option.
+
+
+================================================================================
+ACKNOWLEDGEMENT: aprsc
+================================================================================
+
+aprsr would not exist without aprsc, the APRS-IS server written in C by
+Heikki Hannikainen (OH7LZB) and Matti Aarnio (OH2MQK).
+
+    aprsc — https://github.com/hessu/aprsc — http://he.fi/aprsc/
+    Copyright (c) 2007-2012 Matti Aarnio <mea@nic.funet.fi>
+    Copyright (c) 2007-2012 Heikki Hannikainen <hessu@hes.iki.fi>
+    Licensed under the BSD 3-Clause License.
+
+aprsc has carried the core of the APRS-IS network for well over a decade. Its
+module decomposition — separating packet parsing, q-construct handling,
+duplicate detection, server-side filtering, the client registry, and the
+incoming/outgoing packet paths into distinct, individually testable units — is
+a genuinely good design, and aprsr's crate and module layout deliberately
+follows it. `docs/architecture.md` records the correspondence module by module.
+Our thanks to the authors for publishing that design openly.
+
+IMPORTANT — aprsr contains NO source code, configuration files, documentation,
+or web assets from aprsc. aprsr is an independent implementation written from
+the public APRS-IS protocol specifications published at http://www.aprs-is.net/
+(notably the Connecting, q construct, and javAPRSFilter documents). aprsc was
+consulted as an architectural reference only. Because aprsr is distributed
+under MIT OR Apache-2.0 rather than aprsc's BSD-3-Clause, this separation is
+maintained deliberately and is a standing rule for all contributions; see
+AGENTS.md.
+
+
+================================================================================
+ACKNOWLEDGEMENT: APRS
+================================================================================
+
+APRS® — the Automatic Packet Reporting System — was created by the late
+Bob Bruninga, WB4APR (1948-2022). APRS is a registered trademark of
+Bob Bruninga's estate. aprsr is not affiliated with or endorsed by the
+trademark holder.
+
+The APRS-IS network, its protocol documentation, and the q construct
+specification are maintained by Pete Loveall, AE5PL, and the wider APRS-IS
+community at http://www.aprs-is.net/. Thank you for keeping the specifications
+public and precise enough to implement against.

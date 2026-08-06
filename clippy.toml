@@ -1,0 +1,21 @@
+# Test code is allowed to panic freely; the deny-level lints in Cargo.toml only
+# need to bind production paths.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+
+# Domain and product names that read as camelCase identifiers to clippy::doc_markdown
+# but are prose, not code. ".." keeps clippy's own defaults.
+doc-valid-idents = [
+    "APRS-IS",
+    "IGate",
+    "IGates",
+    "SeaORM",
+    "SQLite",
+    "TypeScript",
+    "aprsc",
+    "javAPRSFilter",
+    "javAPRSSrvr",
+    "..",
+]

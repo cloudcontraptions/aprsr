@@ -1,0 +1,28 @@
+{
+  "name": "aprsr-web-assets",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dashboard and landing page assets for aprsr",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "npm run build:css && npm run build:js && npm run build:site",
+    "build:css": "tailwindcss --input src/css/app.css --output ../crates/aprsr-web/static/app.css --minify",
+    "build:js": "esbuild src/ts/dashboard.ts --bundle --minify --format=iife --target=es2022 --outfile=../crates/aprsr-web/static/app.js",
+    "build:site": "tailwindcss --input src/css/site.css --output ../www/dist/site.css --minify && node scripts/copy-site.mjs",
+    "watch:css": "tailwindcss --input src/css/app.css --output ../crates/aprsr-web/static/app.css --watch",
+    "watch:js": "esbuild src/ts/dashboard.ts --bundle --format=iife --target=es2022 --outfile=../crates/aprsr-web/static/app.js --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "htmx.org": "2.0.10"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "4.3.3",
+    "esbuild": "0.28.1",
+    "tailwindcss": "4.3.3",
+    "typescript": "7.0.2",
+    "vitest": "3.2.7"
+  }
+}

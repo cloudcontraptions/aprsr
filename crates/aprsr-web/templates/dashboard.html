@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block content %}
+<!--
+  Each panel is an HTMX polling target. The initial content is rendered server-side so the
+  page is complete on first paint, then swapped in place every few seconds.
+-->
+<section
+  id="summary"
+  hx-get="/fragments/summary"
+  hx-trigger="every 5s"
+  hx-swap="outerHTML"
+>
+  {{ summary_html|safe }}
+</section>
+
+<section
+  id="listeners"
+  class="mt-8"
+  hx-get="/fragments/listeners"
+  hx-trigger="every 15s"
+  hx-swap="outerHTML"
+>
+  {{ listeners_html|safe }}
+</section>
+
+<section
+  id="clients"
+  class="mt-8"
+  hx-get="/fragments/clients"
+  hx-trigger="every 5s"
+  hx-swap="outerHTML"
+>
+  {{ clients_html|safe }}
+</section>
+{% endblock %}

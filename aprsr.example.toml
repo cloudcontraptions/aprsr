@@ -1,0 +1,100 @@
+# aprsr configuration.
+#
+# Copy this file to aprsr.toml and edit it, then start the server with
+#
+#     aprsr run --config aprsr.toml
+#
+# Check a file without starting anything:
+#
+#     aprsr check-config --config aprsr.toml
+#
+# Migrating from aprsc? Convert your existing configuration instead of retyping it:
+#
+#     aprsr convert-config /etc/aprsc/aprsc.conf --output aprsr.toml
+#
+# Every setting can also be overridden from the environment with an APRSR_ prefix and a
+# double underscore for nesting, e.g. APRSR_SERVER__ID=N0CALL-1.
+
+[server]
+# This server's identity on APRS-IS. It MUST be unique across the whole network —
+# per http://www.aprs-is.net/q.aspx a shared identity breaks loop detection for
+# everyone, not just for you. aprsr refuses to start while this is still "NOCALL".
+id = "N0CALL-1"
+
+# Passcode for the identity above. `aprsr passcode <callsign>` will compute it.
+passcode = 13023
+
+# Shown on the status page so people know who to contact.
+admin = "Your Name, YOURCALL"
+email = "you@example.com"
+
+# Directory for persistent state, relative to the working directory.
+run_dir = "data"
+
+[limits]
+# Disconnect a client that has sent nothing at all for this long.
+client_timeout = "48h"
+# Give up on an uplink that has gone quiet and try the next one.
+upstream_timeout = "15s"
+# How long a packet is remembered for duplicate detection. Long enough to absorb the
+# spread between IGates hearing the same transmission, short enough not to suppress a
+# station that genuinely re-beacons identical text.
+dupecheck_window = "30s"
+# How often to send an idle client a "#" comment line so the connection stays alive.
+keepalive_interval = "20s"
+# File descriptor limit to request at startup — roughly the maximum client count.
+file_limit = 10000
+# Packets buffered per client before the oldest are dropped. A client too slow to keep
+# up loses packets rather than stalling the whole server.
+client_queue = 1024
+
+[database]
+# SeaORM connection URL. Migrations run automatically at startup.
+# Use "sqlite::memory:" for a stateless server that keeps nothing across restarts.
+url = "sqlite://data/aprsr.sqlite?mode=rwc"
+
+[http]
+# The status dashboard and JSON API. Comment out to disable the web interface.
+status_bind = "0.0.0.0:14501"
+
+# --- Listening ports ----------------------------------------------------------------
+#
+# kind is one of:
+#   fullfeed  — everything, after duplicate filtering; clients cannot set filters
+#   igate     — client and IGate port with user-defined filters
+#   dupefeed  — the packets duplicate detection dropped, for diagnostics
+#   udpsubmit — packet submission only, nothing is sent back
+#
+# "[::]" accepts both IPv6 and IPv4 connections on Linux. Use "0.0.0.0" for IPv4 only.
+
+[[listen]]
+name = "Full feed"
+kind = "fullfeed"
+bind = "[::]:10152"
+# Hidden ports do not appear on the public status page.
+hidden = true
+
+[[listen]]
+name = "Client-Defined Filters"
+kind = "igate"
+bind = "[::]:14580"
+max_clients = 1000
+
+# A port with a filter forced on every client, whatever they ask for.
+# [[listen]]
+# name = "350 km from my position"
+# kind = "igate"
+# bind = "[::]:20350"
+# filter = "m/350"
+
+# --- Uplinks ------------------------------------------------------------------------
+#
+# Uplink support is on the roadmap and is not active in this release; the configuration
+# is parsed and validated so existing files keep working.
+#
+# kind is "full" for a bidirectional feed or "readonly" to never transmit upstream.
+#
+# [[uplink]]
+# name = "Core rotate"
+# kind = "full"
+# address = "rotate.aprs.net:10152"
