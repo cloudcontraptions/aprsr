@@ -55,6 +55,12 @@ pub enum ConfigError {
         #[source]
         source: aprsr_core::filter::FilterError,
     },
+    #[error("access list entry {found:?} is not usable: {source}")]
+    InvalidAccessBlock {
+        found: String,
+        #[source]
+        source: aprsr_core::access::CidrError,
+    },
     #[error("could not serialise configuration: {0}")]
     Serialise(#[from] toml::ser::Error),
 }
@@ -76,11 +82,117 @@ pub struct Config {
     pub database: Database,
     #[serde(default)]
     pub http: Http,
+    /// Skipped when it says nothing, so `convert-config` does not emit an empty `[access]`
+    /// table into a file converted from an `aprsc.conf` that had no ACLs.
+    #[serde(default, skip_serializing_if = "Access::is_default")]
+    pub access: Access,
     #[serde(default, rename = "listen")]
     pub listeners: Vec<Listener>,
     #[serde(default, rename = "uplink")]
     pub uplinks: Vec<Uplink>,
 }
+
+/// Who may connect, and how fast they may talk.
+///
+/// Written in TOML rather than in the separate ACL files aprsc uses. One file that describes
+/// the whole server is easier to review, to put under version control and to reason about
+/// than a `.conf` that names four `.acl` files whose contents nobody remembers — and
+/// configuration parity was never the goal.
+///
+/// `Default` is derived rather than written out, unlike [`Http`]: every field here is
+/// "absent means nothing configured", so the derived and the per-field defaults agree.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Access {
+    /// What to do with an address no `allow` or `deny` block covers.
+    ///
+    /// `allow` — the default — suits a public APRS-IS server, which exists to be connected
+    /// to. `deny` turns the lists into an allowlist for a closed network.
+    #[serde(default, skip_serializing_if = "AccessDefault::is_allow")]
+    pub default: AccessDefault,
+    /// CIDR blocks — or bare addresses, meaning that host — that may connect.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    /// Blocks that may not.
+    ///
+    /// The most specific rule wins, so a `deny` of `10.1.2.0/24` inside an `allow` of
+    /// `10.0.0.0/8` means what it looks like, whichever order they are written in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
+    /// Callsigns refused at login. A trailing `*` matches every SSID, as in the `b/` filter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub block_callsigns: Vec<String>,
+    /// Sustained packets per second one client may submit.
+    ///
+    /// Unset — and zero — mean unlimited. Both spellings exist because an operator who once
+    /// set a limit and then wanted it gone will reach for one or the other, and disagreeing
+    /// with them about which is a poor use of a configuration file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_packets_per_second: Option<u32>,
+    /// How far above that rate a client may burst, having been quiet.
+    ///
+    /// APRS traffic is legitimately bursty — an IGate quiet all night gates six packets when
+    /// a net starts — so a limit with no burst allowance would refuse normal operation.
+    /// Unset means [`DEFAULT_RATE_BURST`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst: Option<u32>,
+}
+
+/// What an address no rule covers may do.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AccessDefault {
+    #[default]
+    Allow,
+    Deny,
+}
+
+impl AccessDefault {
+    #[must_use]
+    pub const fn is_allow(&self) -> bool {
+        matches!(self, Self::Allow)
+    }
+}
+
+impl Access {
+    /// Whether any address rule is configured at all.
+    ///
+    /// When nothing is, the server skips the check on the accept path entirely.
+    #[must_use]
+    pub fn has_address_rules(&self) -> bool {
+        self.default == AccessDefault::Deny || !self.allow.is_empty() || !self.deny.is_empty()
+    }
+
+    /// Whether submissions are rate limited.
+    #[must_use]
+    pub fn is_rate_limited(&self) -> bool {
+        self.max_packets_per_second.is_some_and(|rate| rate > 0)
+    }
+
+    /// The sustained rate in force; zero means unlimited.
+    #[must_use]
+    pub fn rate(&self) -> u32 {
+        self.max_packets_per_second.unwrap_or(0)
+    }
+
+    /// The burst allowance in force.
+    #[must_use]
+    pub fn burst(&self) -> u32 {
+        self.burst.unwrap_or(DEFAULT_RATE_BURST)
+    }
+
+    /// Whether this section carries no rules at all.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Default burst allowance: twenty packets.
+///
+/// Comfortably above what any single station beacons and well below what a runaway script
+/// produces, so it bounds the damage without being reached in normal use.
+pub const DEFAULT_RATE_BURST: u32 = 20;
 
 /// Server identity and operator contact details.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -119,6 +231,15 @@ pub struct Limits {
     /// How long a packet is remembered for duplicate detection.
     #[serde(default = "default_dupecheck_window")]
     pub dupecheck_window: Interval,
+    /// How long a client counts as a route back to a station it gated.
+    ///
+    /// The messaging obligation at <http://www.aprs-is.net/ServerDesign.aspx> — a client
+    /// receives messages addressed to any station it has gated — needs a memory of who
+    /// gated what, and this is how long that memory lasts. The specification states the
+    /// obligation without naming a window; the default is a judgement about how often
+    /// stations beacon.
+    #[serde(default = "default_heard_window")]
+    pub heard_window: Interval,
     /// How often to send a keepalive comment line to idle clients.
     #[serde(default = "default_keepalive_interval")]
     pub keepalive_interval: Interval,
@@ -140,12 +261,123 @@ pub struct Database {
 }
 
 /// HTTP listeners.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+///
+/// `Default` is written out rather than derived. `Config.http` is `#[serde(default)]`, so a
+/// file with no `[http]` table at all is built by `Http::default()` — which does not run the
+/// per-field `#[serde(default = ...)]` functions. A derived `Default` would therefore give a
+/// server with no `[http]` section an empty map tile URL while one with an empty `[http]`
+/// section got the real default, and nothing would point at why.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Http {
     /// Address for the status dashboard and JSON API.
     #[serde(default)]
     pub status_bind: Option<SocketAddr>,
+    /// Shared secret required by the endpoints that change server state.
+    ///
+    /// Unset — the default — disables those endpoints entirely rather than leaving them
+    /// open. The status interface has no other authentication, so an endpoint that can
+    /// re-read configuration must not be reachable simply because the port is.
+    ///
+    /// Prefer supplying this through the environment (`APRSR_HTTP__ADMIN_TOKEN`) rather
+    /// than writing it into the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_token: Option<String>,
+    /// Serve the live packet feed at `/events/packets`.
+    ///
+    /// Off by default, and requires `admin_token` even when on. The feed is a full APRS-IS
+    /// stream over HTTP with no passcode and no filter, so enabling it makes the status
+    /// port a data source rather than only a status page — a deliberate act, not a default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub packet_stream: bool,
+    /// A file whose contents are shown as a banner on the dashboard.
+    ///
+    /// The contents are inserted as **raw HTML**, so the operator can style a notice the
+    /// way aprsc's `motd.html` allows. This is trusted input at the same level as this
+    /// configuration file: anybody who can write it can already run code as the server
+    /// user, so it grants no new authority — but it should not be group-writable.
+    ///
+    /// A missing file is not an error; it simply means no banner, so a notice can be added
+    /// and removed by creating and deleting the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motd_file: Option<PathBuf>,
+    /// Tile server for the dashboard's station map.
+    ///
+    /// Sent to the browser rather than compiled into the bundle, so a closed network can
+    /// point it at its own tiles. Set it to an empty string to draw stations on a plain
+    /// background and contact no tile server at all.
+    #[serde(
+        default = "default_map_tile_url",
+        skip_serializing_if = "is_default_map_tile_url"
+    )]
+    pub map_tile_url: String,
+    /// Attribution shown on the map, which most tile servers require.
+    #[serde(
+        default = "default_map_tile_attribution",
+        skip_serializing_if = "is_default_map_tile_attribution"
+    )]
+    pub map_tile_attribution: String,
+}
+
+impl Default for Http {
+    fn default() -> Self {
+        Self {
+            status_bind: None,
+            admin_token: None,
+            packet_stream: false,
+            motd_file: None,
+            map_tile_url: default_map_tile_url(),
+            map_tile_attribution: default_map_tile_attribution(),
+        }
+    }
+}
+
+/// OpenStreetMap's public tiles, which work out of the box.
+///
+/// Heavy use is against their tile usage policy, so an operator running a busy dashboard
+/// should point this at their own server — which is the reason it is configurable.
+fn default_map_tile_url() -> String {
+    "https://tile.openstreetmap.org/{z}/{x}/{y}.png".to_owned()
+}
+
+fn default_map_tile_attribution() -> String {
+    "© OpenStreetMap contributors".to_owned()
+}
+
+// A value left at its default is not something the operator chose, so it is left out when
+// a configuration is written back — by `convert-config`, or by any round trip. A generated
+// file should show what was asked for, not every setting that exists.
+fn is_default_map_tile_url(value: &str) -> bool {
+    value == default_map_tile_url()
+}
+
+fn is_default_map_tile_attribution(value: &str) -> bool {
+    value == default_map_tile_attribution()
+}
+
+impl Http {
+    /// Whether a presented token matches the configured one.
+    ///
+    /// False whenever no token is configured, so the administrative endpoints are closed by
+    /// default rather than open by default.
+    ///
+    /// The comparison is length-then-bytes in constant time for its length, so a caller
+    /// cannot learn the token one character at a time from response timing. This matters
+    /// more than it looks: the endpoint is unauthenticated except for this check.
+    #[must_use]
+    pub fn admin_token_matches(&self, presented: &str) -> bool {
+        let Some(expected) = self.admin_token.as_deref() else {
+            return false;
+        };
+        if expected.len() != presented.len() {
+            return false;
+        }
+        expected
+            .bytes()
+            .zip(presented.bytes())
+            .fold(0u8, |differences, (a, b)| differences | (a ^ b))
+            == 0
+    }
 }
 
 /// What a listening port accepts.
@@ -204,6 +436,78 @@ pub struct Listener {
     /// Hide this port from the public status page.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// Wrap connections to this port in TLS.
+    ///
+    /// A separate port rather than a mode on an existing one, because it has to be: TLS and
+    /// plaintext cannot share a listener, and every APRS-IS client in existence expects the
+    /// well-known ports to be plaintext.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<ListenerTls>,
+    /// Whether an IPv6 bind should also accept IPv4 connections.
+    ///
+    /// Only meaningful when `bind` is an IPv6 address; ignored otherwise. Left unset it
+    /// means "yes", which is almost always what an operator writing `[::]` intends.
+    ///
+    /// This exists because the operating-system default disagrees across platforms —
+    /// Linux usually accepts IPv4 on an IPv6 socket, Windows and the BSDs usually do not.
+    /// aprsr sets the option explicitly so `[::]:14580` behaves the same everywhere
+    /// instead of quietly refusing IPv4 clients on some of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dual_stack: Option<bool>,
+}
+
+impl Listener {
+    /// Whether connections to this port are wrapped in TLS.
+    #[must_use]
+    pub const fn is_tls(&self) -> bool {
+        self.tls.is_some()
+    }
+
+    /// Whether this listener should accept IPv4 connections on an IPv6 socket.
+    ///
+    /// Meaningless for an IPv4 bind, where it is always false.
+    #[must_use]
+    pub fn wants_dual_stack(&self) -> bool {
+        self.bind.is_ipv6() && self.dual_stack.unwrap_or(true)
+    }
+}
+
+/// TLS on a listening port.
+///
+/// APRS-IS carries public data, so this is not about the packets: it is about the login
+/// line, which carries a passcode, and about a client on a hostile network being able to
+/// tell that the server it reached is the one it meant to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListenerTls {
+    /// The certificate chain, in PEM. Leaf first, then the intermediates that chain it to a
+    /// root — what Let's Encrypt calls `fullchain.pem`. A file with only the leaf in it works
+    /// against a client that already has the intermediate and fails everywhere else.
+    pub cert: PathBuf,
+    /// The private key, in PEM. PKCS#8, PKCS#1 and SEC1 are all accepted.
+    pub key: PathBuf,
+}
+
+/// TLS on an outbound uplink.
+///
+/// Present at all — even as an empty table — means "connect with TLS".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UplinkTls {
+    /// Verify the upstream server against this bundle *instead of* the built-in roots.
+    ///
+    /// Instead, not in addition: a closed network that meant to trust one authority should
+    /// not silently keep trusting a hundred public ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_file: Option<PathBuf>,
+    /// The name to verify the certificate against, when it is not the one in `address`.
+    ///
+    /// Needed when connecting by IP address, or through a tunnel whose hostname differs from
+    /// the certificate's. There is deliberately no option to skip verification altogether:
+    /// a `qAS` construct naming a server aprsr did not actually authenticate is wrong
+    /// information injected into the whole network, and "just this once" is how that ships.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
 }
 
 /// How much traffic to take from an uplink.
@@ -224,6 +528,31 @@ pub struct Uplink {
     pub kind: UplinkKind,
     /// `host:port`, resolved at connection time so DNS rotations keep working.
     pub address: String,
+    /// Connect with TLS. Present at all — `tls = {}` — turns it on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<UplinkTls>,
+}
+
+impl Uplink {
+    /// The name the upstream server's certificate is verified against.
+    ///
+    /// `server_name` when set, otherwise the host part of `address` — which is what an
+    /// operator writing `rotate.aprs.net:24152` means, and the only thing a DNS rotation
+    /// could sensibly be verified as.
+    #[must_use]
+    pub fn tls_server_name(&self) -> Option<&str> {
+        let tls = self.tls.as_ref()?;
+        Some(match tls.server_name.as_deref() {
+            Some(name) => name,
+            // Splitting on the last colon leaves a bracketed IPv6 literal intact, which is
+            // then not a valid DNS name — correctly, since a certificate for one needs an
+            // explicit `server_name` anyway.
+            None => self
+                .address
+                .rsplit_once(':')
+                .map_or(self.address.as_str(), |(host, _)| host),
+        })
+    }
 }
 
 impl Config {
@@ -285,6 +614,18 @@ impl Config {
             }
         }
 
+        // Every block is parsed at startup rather than at accept time. A typo in an ACL that
+        // only surfaced when the first connection arrived would be an ACL nobody could trust,
+        // and the failure would look like a network problem rather than a configuration one.
+        for block in self.access.allow.iter().chain(&self.access.deny) {
+            aprsr_core::access::Cidr::parse(block).map_err(|source| {
+                ConfigError::InvalidAccessBlock {
+                    found: block.clone(),
+                    source,
+                }
+            })?;
+        }
+
         Ok(())
     }
 
@@ -300,6 +641,7 @@ impl Default for Limits {
             client_timeout: default_client_timeout(),
             upstream_timeout: default_upstream_timeout(),
             dupecheck_window: default_dupecheck_window(),
+            heard_window: default_heard_window(),
             keepalive_interval: default_keepalive_interval(),
             file_limit: default_file_limit(),
             client_queue: default_client_queue(),
@@ -329,6 +671,10 @@ fn default_upstream_timeout() -> Interval {
 
 fn default_dupecheck_window() -> Interval {
     Interval::from_secs(aprsr_core::dupecheck::DEFAULT_WINDOW_SECS)
+}
+
+fn default_heard_window() -> Interval {
+    Interval::from_secs(30 * 60)
 }
 
 fn default_keepalive_interval() -> Interval {

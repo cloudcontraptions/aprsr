@@ -40,9 +40,23 @@ upstream_timeout = "15s"
 # spread between IGates hearing the same transmission, short enough not to suppress a
 # station that genuinely re-beacons identical text.
 dupecheck_window = "30s"
+# How long a client counts as a route back to a station it gated onto APRS-IS.
+#
+# APRS-IS servers are required to deliver a message to whichever client gated the station
+# it is addressed to, whatever that client's filter says — otherwise messaging works only
+# on unfiltered full feeds, since a filter is written around a place and a message from
+# the other side of the world matches none of it.
+#
+# Longer than a station's beacon interval, so it stays reachable between beacons; short
+# enough that a mobile which has driven out of an IGate's range stops having its messages
+# sent to a gateway that can no longer hear it.
+heard_window = "30m"
 # How often to send an idle client a "#" comment line so the connection stays alive.
 keepalive_interval = "20s"
-# File descriptor limit to request at startup — roughly the maximum client count.
+# File descriptor limit to request at startup — roughly the maximum client count, since
+# each connected client holds one descriptor. aprsr raises its soft limit to this at
+# startup, capped by the hard limit; if the hard limit is lower it says so in a warning.
+# Ignored on Windows, which has no equivalent per-process limit.
 file_limit = 10000
 # Packets buffered per client before the oldest are dropped. A client too slow to keep
 # up loses packets rather than stalling the whole server.
@@ -57,15 +71,68 @@ url = "sqlite://data/aprsr.sqlite?mode=rwc"
 # The status dashboard and JSON API. Comment out to disable the web interface.
 status_bind = "0.0.0.0:14501"
 
+# Shared secret for the endpoints that change server state — currently just
+# `POST /admin/reload`, which re-reads this file without disconnecting anyone.
+#
+# Unset, as it is here, those endpoints are disabled entirely rather than left open: the
+# status interface has no other authentication, so anything that can reach the port could
+# otherwise reconfigure the server.
+#
+# Prefer the environment over this file, so the secret is not sitting in configuration:
+#
+#     APRSR_HTTP__ADMIN_TOKEN=$(openssl rand -hex 32)
+#
+# Then, to reload:
+#
+#     curl -XPOST -H "X-Aprsr-Admin-Token: $APRSR_HTTP__ADMIN_TOKEN" \
+#          http://localhost:14501/admin/reload
+#
+# On Unix, `kill -HUP <pid>` does the same thing and needs no token. Windows has no
+# equivalent signal, which is why this endpoint exists.
+#
+# admin_token = "generate-something-random"
+
+# Serve the relayed packet feed at /events/packets, for the dashboard's live view.
+#
+# Off by default, and it still requires admin_token when on. This is a full APRS-IS feed
+# over HTTP with no passcode and no filter, so turning it on makes the status port a data
+# source rather than only a status page.
+# packet_stream = true
+
+# A file whose contents appear as a banner on the dashboard, for maintenance notices.
+#
+# Inserted as raw HTML so a notice can be formatted, and therefore trusted at the same level
+# as this file: anybody who can write it can already run code as the server user. Do not
+# make it group-writable. A missing or empty file simply means no banner, so a notice goes
+# up and comes down by creating and deleting the file — no restart, no reload.
+# motd_file = "motd.html"
+
+# Tile server for the station map. Sent to the browser rather than compiled into the
+# dashboard bundle, so a closed network can point it somewhere else without rebuilding.
+# Set it to "" to plot stations on a plain background and contact no tile server at all.
+#
+# The default is OpenStreetMap's public tiles, which work out of the box. Their usage policy
+# does not cover heavy traffic, so a busy server should host its own.
+# map_tile_url = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+# map_tile_attribution = "© OpenStreetMap contributors"
+
 # --- Listening ports ----------------------------------------------------------------
 #
 # kind is one of:
 #   fullfeed  — everything, after duplicate filtering; clients cannot set filters
 #   igate     — client and IGate port with user-defined filters
-#   dupefeed  — the packets duplicate detection dropped, for diagnostics
+#   dupefeed  — the packets duplicate detection suppressed, for diagnostics. Delivered
+#               verbatim and unfiltered: no q construct is applied, because the packet did
+#               not enter APRS-IS here and the path it arrived with is the whole point
 #   udpsubmit — packet submission only, nothing is sent back
 #
-# "[::]" accepts both IPv6 and IPv4 connections on Linux. Use "0.0.0.0" for IPv4 only.
+# "[::]" accepts both IPv6 and IPv4 connections, on every platform aprsr supports — it
+# sets the socket option explicitly rather than inheriting a default that differs between
+# Linux, Windows and the BSDs. Use "0.0.0.0" to listen on IPv4 only, or set
+# `dual_stack = false` on an IPv6 listener to accept IPv6 only.
+#
+# On Windows, a path elsewhere in this file needs single quotes: TOML treats a backslash
+# in a "double quoted" string as an escape, so run_dir = 'C:\ProgramData\aprsr'.
 
 [[listen]]
 name = "Full feed"
@@ -79,6 +146,8 @@ name = "Client-Defined Filters"
 kind = "igate"
 bind = "[::]:14580"
 max_clients = 1000
+# Accept IPv6 only on this port, refusing IPv4. Left unset an IPv6 bind accepts both.
+# dual_stack = false
 
 # A port with a filter forced on every client, whatever they ask for.
 # [[listen]]
@@ -87,14 +156,166 @@ max_clients = 1000
 # bind = "[::]:20350"
 # filter = "m/350"
 
+# Packet submission over UDP. A datagram carries a login line and one or more packets;
+# there is no connection and no session, which is how a station that beacons every few
+# minutes avoids holding a socket open all day. Each datagram is verified on its own,
+# because there is no session to verify once — and a source address is not a credential.
+#
+# This is also the only port kind that produces a qAU construct.
+#
+# Configuring one has a second effect: it is what lets a TCP client ask for its *feed*
+# over UDP with "UDP <port>" in its login line. Without a UDP listener aprsr sends no
+# datagrams at all, and such a client quietly gets the ordinary TCP feed instead.
+#
+# [[listen]]
+# name = "UDP submit"
+# kind = "udpsubmit"
+# protocol = "udp"
+# bind = "[::]:8080"
+
+# A TLS port. APRS-IS carries public data — positions and weather reports that are
+# broadcast over the air by design — so this is not about the packets. It is about the
+# login line, which carries a passcode, and about a client on a hostile network being
+# able to tell that the server it reached is the one it meant to.
+#
+# It has to be a separate port: TLS and plaintext cannot share one, and every APRS-IS
+# client in existence expects the well-known ports to be plaintext. There is no
+# registered TLS port for APRS-IS, so 24580 here is simply "14580 plus ten thousand" —
+# pick whatever suits your firewall.
+#
+# `cert` is the full chain, leaf first and then the intermediates that chain it to a root
+# — what Let's Encrypt calls fullchain.pem. A file with only the leaf in it works against
+# a client that already has the intermediate cached and fails everywhere else, which is
+# the classic TLS deployment bug.
+#
+# `key` may be PKCS#8, PKCS#1 or SEC1. Both files are read and checked when the server
+# binds, so a bad path or a mismatched pair stops startup with the filename in the
+# message rather than failing the first connection at three in the morning.
+#
+# On Windows use single quotes: 'C:\ProgramData\aprsr\fullchain.pem'.
+#
+# [[listen]]
+# name = "Secure client port"
+# kind = "igate"
+# bind = "[::]:24580"
+# tls = { cert = "/etc/letsencrypt/live/aprs.example.net/fullchain.pem", key = "/etc/letsencrypt/live/aprs.example.net/privkey.pem" }
+
+# --- Access control -------------------------------------------------------------------
+#
+# Who may connect, who may log in, and how fast one client may talk. All of it is here
+# rather than in separate .acl files: one file that describes the whole server is easier
+# to review and to keep in version control than a .conf naming four files nobody
+# remembers the contents of.
+#
+# [access]
+#
+# What happens to an address no rule below covers. "allow" — the default — suits a public
+# APRS-IS server, which exists to be connected to. "deny" turns the lists into an
+# allowlist for a closed network.
+# default = "allow"
+#
+# CIDR blocks, or bare addresses meaning that one host. The MOST SPECIFIC rule wins, so
+# the pair below means "10/8 may connect, except 10.1.2.0/24" — and it means that
+# whichever order the two lines are written in. Order carrying no meaning is what stops
+# an ACL breaking when somebody appends a line.
+# allow = ["10.0.0.0/8", "2001:db8::/32"]
+# deny  = ["10.1.2.0/24", "192.0.2.66"]
+#
+# Blocked addresses are refused before the banner is even written — the check is the first
+# thing that happens on an accepted connection.
+#
+# Callsigns refused at login. A trailing "*" matches every SSID, as in the b/ filter,
+# which is what blocking a station means since SSIDs are free. Unlike a blocked address, a
+# blocked callsign is told so: it is usually a misconfigured station rather than a hostile
+# one, and one that knows it was refused can be fixed.
+# block_callsigns = ["N0SPAM*"]
+#
+# Sustained packets per second one client may submit; 0 (the default) is unlimited. A
+# client over its rate loses packets and keeps its connection — disconnecting would turn a
+# beacon interval that is slightly too short into a reconnect loop that costs more than
+# the packets did.
+#
+# The burst is what makes this usable: APRS traffic is legitimately bursty, and an IGate
+# quiet all night gates several packets the moment a net starts.
+# max_packets_per_second = 10
+# burst = 20
+
 # --- Uplinks ------------------------------------------------------------------------
 #
-# Uplink support is on the roadmap and is not active in this release; the configuration
-# is parsed and validated so existing files keep working.
+# Outbound connections to other APRS-IS servers. Without at least one, aprsr is a
+# standalone server: it relays between its own clients and exchanges nothing with the
+# rest of the network.
 #
-# kind is "full" for a bidirectional feed or "readonly" to never transmit upstream.
+# kind is:
+#   "readonly"  take the feed, send nothing upstream. Start here.
+#   "full"      bidirectional — this server's clients' traffic goes onto APRS-IS.
+#
+# A "full" uplink needs a valid server.passcode above, and a valid tier-2 registration
+# for the callsign. Without one the link still connects and still receives, but the
+# upstream server refuses to relay what this one sends. `aprsr check-config` warns about
+# exactly that case, and the dashboard says "connected" either way — so check it.
+#
+# The address is resolved on every connection attempt, never cached. rotate.aprs.net is
+# a DNS rotation that answers with a different server each time, and aprsr walks round
+# the answers so a member being down costs one attempt rather than the whole uplink.
+#
+# `limits.upstream_timeout` above is the other half of that: a TCP connection that is open
+# but silent is indistinguishable from a working one at the socket level, and an APRS-IS
+# feed is never silent for that long.
+#
+# SEVERAL UPLINKS ARE A FAILOVER LIST, NOT A MESH. Exactly one is connected at a time, in
+# the order written here. This is not a tuning choice — APRS-IS requires it: "Servers
+# should only connect to a single upstream server and should never be connected to more
+# than one server at a time. This is critical to preventing loops."
+#     — http://www.aprs-is.net/ServerDesign.aspx
+#
+# The first entry is tried first. If it cannot be reached the next is tried immediately,
+# with no backoff, because the whole point of an alternative is that it is probably up.
+# Only when a complete pass has failed does aprsr wait, doubling from 5 s to a minute. A
+# session that lasts long enough to count as healthy resets the list, so your first choice
+# gets tried first again once it comes back.
+#
+# aprsr does not implement peer groups — the sideways mesh between core servers. APRS-IS
+# does not describe one; see docs/peer-groups.md.
 #
 # [[uplink]]
 # name = "Core rotate"
-# kind = "full"
+# kind = "readonly"
 # address = "rotate.aprs.net:10152"
+#
+# [[uplink]]
+# name = "Fallback"
+# kind = "readonly"
+# address = "t2finland.aprs2.net:14580"
+
+# An uplink over TLS. Present at all — even as an empty `tls = {}` — turns it on.
+#
+# The upstream server's certificate is verified against the Mozilla root store, which is
+# compiled into the binary as data rather than read from the operating system. That is
+# three different mechanisms across Linux, macOS and Windows, and it would make an
+# uplink's trust decisions depend on which host it happened to be running on.
+#
+# There is deliberately no option to skip verification. A qAS construct naming a server
+# aprsr did not actually authenticate is not a local mistake — it is wrong information
+# injected into the whole network, where nobody can tell it was this server that did it.
+#
+# [[uplink]]
+# name = "Secure core"
+# kind = "readonly"
+# address = "t2finland.aprs2.net:24152"
+# tls = {}
+
+# On a closed network with a private certificate authority, point `ca_file` at it. That
+# store replaces the built-in roots rather than adding to them: a network that meant to
+# trust one authority should not silently keep trusting a hundred public ones.
+#
+# `server_name` is the name the certificate is checked against, needed when connecting by
+# IP address or through a tunnel whose hostname differs from the certificate's. Left
+# unset it is the host part of `address`, which is what an operator writing a hostname
+# means. A bare IPv6 literal always needs it set explicitly.
+#
+# [[uplink]]
+# name = "Site B"
+# kind = "full"
+# address = "10.0.0.7:24152"
+# tls = { ca_file = "/etc/aprsr/site-ca.pem", server_name = "aprs.site-b.internal" }

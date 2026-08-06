@@ -1,0 +1,91 @@
+{#-
+  Outbound links to other APRS-IS servers.
+
+  The whole section is omitted when no uplink is configured, because a standalone server is
+  a legitimate way to run aprsr and an empty "Uplinks" heading would read as something
+  missing rather than something not asked for.
+
+  Every *configured* uplink appears, connected or not. An uplink that has never come up is
+  the one an operator most needs to see, and the reason it has not is in the last column.
+-#}
+{% if !uplinks.is_empty() %}
+<section
+  id="uplinks"
+  class="mt-8"
+  hx-get="/fragments/uplinks"
+  hx-trigger="aprsr:status from:body, every 30s"
+  hx-swap="outerHTML"
+>
+  <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-400">
+    Uplinks
+  </h2>
+
+  <div class="overflow-x-auto rounded-lg border border-slate-800">
+    <table class="min-w-full text-sm">
+      <thead class="bg-slate-900/70 text-left text-xs uppercase tracking-wide text-slate-500">
+        <tr>
+          <th class="px-4 py-2 font-medium">Name</th>
+          <th class="px-4 py-2 font-medium">Address</th>
+          <th class="px-4 py-2 font-medium">Direction</th>
+          <th class="px-4 py-2 font-medium">Peer</th>
+          <th class="px-4 py-2 text-right font-medium">Up</th>
+          <th class="px-4 py-2 text-right font-medium">In</th>
+          <th class="px-4 py-2 text-right font-medium">Out</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-800/70">
+        {% for uplink in uplinks %}
+        <tr class="bg-slate-900/20">
+          <td class="px-4 py-2 text-slate-100">
+            {{ uplink.name }}
+            {% if uplink.connected %}
+            <span
+              class="ml-1 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] uppercase text-emerald-400"
+              title="Connected and exchanging traffic"
+              >{{ uplink.state }}</span
+            >
+            {% else %}
+            <span
+              class="ml-1 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] uppercase text-amber-100"
+              title="Not exchanging traffic"
+              >{{ uplink.state }}</span
+            >
+            {% endif %}
+          </td>
+          <td class="px-4 py-2 font-mono text-xs text-slate-400">
+            {{ uplink.address }}
+            {% if uplink.tls %}
+            <span
+              class="ml-2 rounded bg-emerald-500/10 px-1.5 py-0.5 font-sans text-[10px] font-semibold uppercase tracking-wide text-emerald-400"
+              title="This link dials out over TLS and verifies the upstream certificate"
+              >TLS</span
+            >
+            {% endif %}
+          </td>
+          <td class="px-4 py-2 text-slate-400">{{ uplink.kind }}</td>
+          {#- The peer's callsign is what goes into a qAS construct for anything arriving
+              over this link, so it is worth showing beside the address that produced it —
+              a DNS rotation answers as a different server on every connection. -#}
+          <td class="px-4 py-2 font-mono text-slate-300">
+            {{ uplink.peer }}
+            <span class="block text-xs text-slate-500">{{ uplink.peer_addr }}</span>
+          </td>
+          <td class="px-4 py-2 text-right font-mono text-slate-300">{{ uplink.uptime }}</td>
+          <td class="px-4 py-2 text-right font-mono text-slate-300">
+            {{ uplink.packets_received }}
+          </td>
+          <td class="px-4 py-2 text-right font-mono text-slate-300">
+            {{ uplink.packets_sent }}
+          </td>
+        </tr>
+        {% if !uplink.error.is_empty() %}
+        <tr class="bg-slate-900/40">
+          <td colspan="7" class="px-4 pb-2 text-xs text-amber-100">{{ uplink.error }}</td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}

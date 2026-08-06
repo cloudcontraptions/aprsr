@@ -13,7 +13,8 @@ use std::path::PathBuf;
 
 use crate::duration::Interval;
 use crate::{
-    Config, Database, Http, Limits, Listener, PortKind, Protocol, Server, Uplink, UplinkKind,
+    Access, Config, Database, Http, Limits, Listener, PortKind, Protocol, Server, Uplink,
+    UplinkKind,
 };
 
 /// Why an `aprsc.conf` file could not be read at all.
@@ -154,10 +155,13 @@ pub fn convert(text: &str) -> Result<Conversion, ConvertError> {
                 directive: directive.clone(),
                 reason: "HTTP position upload is on the roadmap, not in this release",
             }),
+            // The uplinks themselves convert; only the choice of *source* address for an
+            // outbound connection does not. aprsr lets the operating system pick, which is
+            // right on every host that does not multi-home deliberately.
             "uplinkbind" => warnings.push(Warning::NotSupported {
                 line,
                 directive: directive.clone(),
-                reason: "uplinks are on the roadmap, not in this release",
+                reason: "aprsr does not choose a source address for outbound connections",
             }),
             "logrotate" => warnings.push(Warning::NotSupported {
                 line,
@@ -183,6 +187,7 @@ pub fn convert(text: &str) -> Result<Conversion, ConvertError> {
             database: Database::default(),
             http,
             listeners,
+            access: Access::default(),
             uplinks,
         },
         warnings,
@@ -257,6 +262,13 @@ fn parse_listen(
         filter: None,
         max_clients: None,
         hidden: false,
+        // aprsc has no TLS listener directive to convert from.
+        tls: None,
+        // aprsc has no equivalent directive: it binds one socket per address family and
+        // expects the operator to write two `Listen` lines. Leaving this unset means
+        // aprsr's default — an IPv6 bind also accepts IPv4 — which is what the pair of
+        // lines was expressing, so a converted configuration keeps working with one.
+        dual_stack: None,
     };
 
     let mut i = 5;
@@ -275,11 +287,15 @@ fn parse_listen(
                 listener.max_clients = Some(number(line, "client limit", value)?);
                 i += 2;
             }
+            // The capability exists; only aprsc's shape for it does not. aprsr keeps access
+            // rules in the `[access]` section of the one configuration file rather than in
+            // a separate `.acl` file per port, so there is nothing to read off this line —
+            // the operator has to copy the contents of that file across, and is told so.
             "acl" => {
                 warnings.push(Warning::OptionDropped {
                     line,
                     option: option.clone(),
-                    reason: "address-based access control is on the roadmap",
+                    reason: "aprsr keeps access rules in [access]; copy the file's contents there",
                 });
                 i += 2;
             }
@@ -331,6 +347,9 @@ fn parse_uplink(line: usize, args: &[String]) -> Result<Uplink, ConvertError> {
     })?;
 
     Ok(Uplink {
+        // aprsc's Uplink directive carries no TLS option, so a converted uplink is
+        // plaintext — which is what it was.
+        tls: None,
         name: args.first().cloned().unwrap_or_default(),
         kind,
         address: format!("{host}:{port}"),

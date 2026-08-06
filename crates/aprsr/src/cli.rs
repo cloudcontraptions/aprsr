@@ -60,6 +60,21 @@ pub(crate) enum Command {
         /// The callsign. Any SSID is ignored — passcodes cover the base callsign.
         callsign: String,
     },
+
+    /// Probe a running server's `/healthz`, exiting non-zero if it is not answering.
+    ///
+    /// Exists so a container `HEALTHCHECK` does not have to install curl for one line. The
+    /// address is read from the configuration by default, so the probe and the server
+    /// cannot disagree about which port to use.
+    Healthcheck {
+        /// Path to the configuration file, for the status address.
+        #[arg(short, long, default_value = "/etc/aprsr/aprsr.toml")]
+        config: PathBuf,
+
+        /// Probe this address instead of the one in the configuration.
+        #[arg(long)]
+        address: Option<String>,
+    },
 }
 
 #[cfg(test)]

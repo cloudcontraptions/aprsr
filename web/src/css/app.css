@@ -8,6 +8,72 @@
 @source "../../../crates/aprsr-web/templates/**/*.html";
 @source "../ts/**/*.ts";
 
+/* Test files are excluded because the scanner extracts anything that *looks* like a utility
+   from any text it is given, comments and identifiers included. A test whose prose happens
+   to contain the word "table" or "visible" would otherwise add dead rules to the shipped
+   stylesheet — and, worse, change the committed build, which CI byte-compares. Tests never
+   contribute a class the browser will use, so nothing is lost. */
+@source not "../ts/**/*.test.ts";
+
+/*
+ * Light and dark mode.
+ *
+ * The dashboard uses the slate ramp as a *depth scale* — the dark end for surfaces, the
+ * light end for text — and nothing else. That single convention is what makes a light theme
+ * fifteen lines instead of a `dark:` prefix on every class in every template: reversing the
+ * ramp reverses the whole page. Anything added later must hold to it. A slate value chosen
+ * because it looked right, rather than because of where it sits on the scale, will invert
+ * into something wrong.
+ *
+ * `light-dark()` reads `color-scheme`, so the branch is declared once and the three states
+ * fall out of the three `color-scheme` values below:
+ *
+ *   - no `data-theme` at all (JavaScript off, or before `theme.ts` runs) — `light dark`,
+ *     which means "either, follow the system";
+ *   - `data-theme="light"` / `"dark"` — the reader's explicit override, set by `theme.ts`
+ *     and by the pre-paint script in `base.html`.
+ *
+ * `color-scheme` also fixes the native rendering of the search input, the scrollbars and the
+ * focus rings, which no amount of utility classes would have.
+ *
+ * A browser too old for `light-dark()` computes these as invalid and falls back to
+ * Tailwind's own values — which is the dark theme aprsr shipped with. The failure mode is
+ * "the toggle does nothing", not "the page is unreadable".
+ */
+:root {
+  color-scheme: light dark;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+/* Unlayered on purpose: Tailwind's own values live in `@layer theme`, and any unlayered
+   rule beats a layered one whatever the source order. */
+:root {
+  --color-slate-950: light-dark(oklch(98.4% 0.003 247), oklch(12.9% 0.042 264.695));
+  --color-slate-900: light-dark(oklch(96.2% 0.006 250), oklch(20.8% 0.042 265.755));
+  --color-slate-800: light-dark(oklch(89.5% 0.011 252), oklch(27.9% 0.041 260.031));
+  --color-slate-700: light-dark(oklch(80% 0.015 253), oklch(37.2% 0.044 257.287));
+  --color-slate-600: light-dark(oklch(58% 0.03 256), oklch(44.6% 0.043 257.281));
+  --color-slate-500: light-dark(oklch(48% 0.035 257), oklch(55.4% 0.046 257.417));
+  --color-slate-400: light-dark(oklch(41% 0.04 257), oklch(70.4% 0.04 256.788));
+  --color-slate-300: light-dark(oklch(33% 0.04 258), oklch(86.9% 0.022 252.894));
+  --color-slate-200: light-dark(oklch(25% 0.04 260), oklch(92.9% 0.013 255.508));
+  --color-slate-100: light-dark(oklch(18% 0.04 264), oklch(96.8% 0.007 247.896));
+
+  /* The accents are not part of the ramp, so they are picked per theme for contrast rather
+     than reversed. Each light value is dark enough to read on a near-white surface. */
+  --color-sky-400: light-dark(oklch(52% 0.15 232), oklch(74.6% 0.16 232.661));
+  --color-accent-400: light-dark(oklch(52% 0.15 232), oklch(0.746 0.16 232.661));
+  --color-accent-500: light-dark(oklch(55% 0.16 237), oklch(0.685 0.169 237.323));
+  --color-emerald-400: light-dark(oklch(50% 0.13 163), oklch(76.5% 0.177 163.223));
+  --color-emerald-500: light-dark(oklch(58% 0.15 162), oklch(69.6% 0.17 162.48));
+  --color-amber-100: light-dark(oklch(38% 0.09 70), oklch(96.2% 0.059 95.617));
+}
+
 /*
  * The live indicator reflects HTMX request state: solid when idle, dimmed while a poll is
  * in flight, amber when a poll failed. Driven by `src/ts/live.ts`.
@@ -29,4 +95,38 @@
   #live-indicator {
     transition: none;
   }
+}
+
+/*
+ * Station markers on the map are `divIcon`s carrying a glyph rather than Leaflet's default
+ * image markers — see `src/ts/leaflet-adapter.ts`. Centring is done here because Leaflet
+ * positions the icon's box, not whatever is inside it.
+ */
+.aprsr-marker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  font-size: 14px;
+  line-height: 1;
+  /* A dark halo, so a glyph stays readable over both water and land. Fixed rather than
+     taken from the ramp: the tiles are light in either theme, so a halo that inverted with
+     the page would disappear against them in light mode. */
+  text-shadow: 0 0 3px oklch(12.9% 0.042 264.695), 0 0 2px oklch(12.9% 0.042 264.695);
+}
+
+/*
+ * Column headers carry the sort. The arrow is drawn from `data-sorted`, which `table-dom.ts`
+ * writes, rather than from a class — so the state a screen reader gets via `aria-sort` and
+ * the state a reader sees are written in the same place and cannot drift apart.
+ */
+[data-sort][data-sorted="asc"]::after {
+  content: " ▲";
+  font-size: 0.75em;
+}
+
+[data-sort][data-sorted="desc"]::after {
+  content: " ▼";
+  font-size: 0.75em;
 }

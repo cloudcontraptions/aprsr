@@ -5,6 +5,7 @@
 
 mod cli;
 mod commands;
+mod signals;
 
 use anyhow::Result;
 use clap::Parser;
@@ -27,6 +28,9 @@ async fn main() -> Result<()> {
         Command::Passcode { callsign } => {
             commands::passcode(&callsign);
             Ok(())
+        }
+        Command::Healthcheck { config, address } => {
+            commands::healthcheck(&config, address.as_deref()).await
         }
     }
 }

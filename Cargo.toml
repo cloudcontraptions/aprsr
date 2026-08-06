@@ -25,7 +25,6 @@ aprsr-server = { version = "0.1.0", path = "crates/aprsr-server" }
 aprsr-store = { version = "0.1.0", path = "crates/aprsr-store" }
 aprsr-web = { version = "0.1.0", path = "crates/aprsr-web" }
 
-actix-files = "0.6.10"
 actix-web = "4.14"
 ahash = "0.8"
 anyhow = "1.0"
@@ -47,8 +46,28 @@ sea-orm-migration = { version = "2.0", default-features = false, features = [
     "sqlx-sqlite",
     "with-chrono",
 ] }
+# Unix only, and used only to apply `limits.file_limit`. A dependency rather than a direct
+# syscall because `unsafe_code = "forbid"` is workspace-wide and setrlimit needs unsafe.
+rlimit = "0.11"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Already in the tree transitively via tokio; taken directly so listener sockets can set
+# IPV6_V6ONLY explicitly rather than inheriting a default that differs per platform.
+socket2 = { version = "0.6", features = ["all"] }
+# TLS. `rustls 0.23` is already in the tree through sea-orm's `runtime-tokio-rustls`, and
+# this pins the same `ring` provider it uses — two providers in one process is a runtime
+# ambiguity rustls refuses to guess about, and `aws-lc-rs` would add a C build and new
+# licences for nothing.
+#
+# PEM parsing comes through this too, via `rustls::pki_types::pem`. `rustls-pemfile` was the
+# obvious crate for it and is archived as of 2025, with the advice to use exactly that module
+# instead — which it was always a thin wrapper around.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+# The Mozilla root store as data. Preferred over reading the operating system's store, which
+# is three different mechanisms on the three platforms aprsr supports and would make an
+# uplink's trust decisions differ per host. An operator with a private CA points `ca_file`
+# at it instead.
+webpki-roots = "1"
 thiserror = "2.0"
 time = { version = "0.3", features = ["formatting", "macros"] }
 tokio = { version = "1.53", features = ["full"] }

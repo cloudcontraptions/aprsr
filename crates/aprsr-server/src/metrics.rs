@@ -21,6 +21,9 @@ pub struct Metrics {
     pub packets_invalid: AtomicU64,
     /// Packets dropped by the q algorithm's reject rules — loops and internal traffic.
     pub packets_rejected: AtomicU64,
+    /// Packets whose own content forbids relaying them: NOGATE/RFONLY in the path, a
+    /// third-party packet that has already been on APRS-IS, or a general query.
+    pub packets_not_gateable: AtomicU64,
     /// Packets dropped because the sender had not presented a valid passcode.
     pub packets_unverified: AtomicU64,
     /// Packets dropped because a client's outgoing queue was full.
@@ -33,6 +36,10 @@ pub struct Metrics {
     pub clients_total: AtomicU64,
     /// Logins refused for a bad passcode or a malformed login line.
     pub logins_rejected: AtomicU64,
+    /// Connections refused by an access rule — a blocked address or a blocked callsign.
+    pub connections_refused: AtomicU64,
+    /// Packets dropped because the submitting client was over its rate.
+    pub packets_rate_limited: AtomicU64,
 }
 
 impl Metrics {
@@ -63,6 +70,7 @@ impl Metrics {
             packets_duplicate: get(&self.packets_duplicate),
             packets_invalid: get(&self.packets_invalid),
             packets_rejected: get(&self.packets_rejected),
+            packets_not_gateable: get(&self.packets_not_gateable),
             packets_unverified: get(&self.packets_unverified),
             packets_dropped_slow: get(&self.packets_dropped_slow),
             bytes_received: get(&self.bytes_received),
@@ -70,6 +78,8 @@ impl Metrics {
             clients_connected: get(&self.clients_connected),
             clients_total: get(&self.clients_total),
             logins_rejected: get(&self.logins_rejected),
+            connections_refused: get(&self.connections_refused),
+            packets_rate_limited: get(&self.packets_rate_limited),
         }
     }
 }
@@ -82,6 +92,7 @@ pub struct MetricsSnapshot {
     pub packets_duplicate: u64,
     pub packets_invalid: u64,
     pub packets_rejected: u64,
+    pub packets_not_gateable: u64,
     pub packets_unverified: u64,
     pub packets_dropped_slow: u64,
     pub bytes_received: u64,
@@ -89,6 +100,8 @@ pub struct MetricsSnapshot {
     pub clients_connected: u64,
     pub clients_total: u64,
     pub logins_rejected: u64,
+    pub connections_refused: u64,
+    pub packets_rate_limited: u64,
 }
 
 /// Per-connection counters, kept alongside the client's registry entry.

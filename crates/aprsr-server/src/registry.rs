@@ -29,15 +29,46 @@ impl std::fmt::Display for ClientId {
     }
 }
 
+/// Which side opened a connection, and what that means for the feed.
+///
+/// The registry holds uplinks alongside clients deliberately. Fan-out and the rule that a
+/// packet is never echoed to its own source are the same problem for both, and keeping them
+/// in one collection means there is one implementation of each rather than two that have to
+/// be kept in step. What differs is only what a connection is entitled to receive, which is
+/// exactly what this enum decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionKind {
+    /// A client that connected to one of this server's listeners.
+    Client,
+    /// A server this one connected out to.
+    Uplink {
+        /// Whether packets are sent upstream over this link.
+        ///
+        /// False for a `ro` uplink, which takes the feed and contributes nothing — the safe
+        /// setting for a new server, and the one an operator should start with.
+        transmit: bool,
+    },
+}
+
+impl ConnectionKind {
+    /// Whether this is an outbound link to another server.
+    #[must_use]
+    pub const fn is_uplink(self) -> bool {
+        matches!(self, Self::Uplink { .. })
+    }
+}
+
 /// What the server knows about one connected client.
 #[derive(Debug)]
 pub struct Client {
     pub id: ClientId,
     pub callsign: Arc<str>,
     pub remote: SocketAddr,
-    /// Name of the listener the client arrived on.
+    /// Name of the listener the client arrived on, or of the uplink it is.
     pub listener: Arc<str>,
     pub port_kind: PortKind,
+    /// Whether this connection is a client of ours or a server we called.
+    pub connection: ConnectionKind,
     pub software: Option<String>,
     pub verified: bool,
     /// Unix seconds at login.
@@ -86,6 +117,17 @@ impl Client {
     pub fn try_send(&self, line: Arc<str>) -> bool {
         self.outbox.try_send(line).is_ok()
     }
+
+    /// Whether this connection wants the packets duplicate detection suppressed.
+    ///
+    /// True only for a client of a `dupefeed` port. An uplink never is: a duplicate crossing
+    /// a server boundary would arrive at the far end as a fresh packet and be relayed, which
+    /// is precisely the loop duplicate detection exists to break.
+    #[must_use]
+    pub const fn wants_duplicates(&self) -> bool {
+        matches!(self.connection, ConnectionKind::Client)
+            && matches!(self.port_kind, PortKind::DupeFeed)
+    }
 }
 
 /// How a new client should be registered.
@@ -95,6 +137,8 @@ pub struct Registration {
     pub remote: SocketAddr,
     pub listener: Arc<str>,
     pub port_kind: PortKind,
+    /// Defaults to [`ConnectionKind::Client`]; uplinks set it explicitly.
+    pub connection: ConnectionKind,
     pub software: Option<String>,
     pub verified: bool,
     pub connected_at: u64,
@@ -104,11 +148,36 @@ pub struct Registration {
     pub outbox: mpsc::Sender<Arc<str>>,
 }
 
+/// One packet on its way out, in the three forms fan-out needs it in.
+///
+/// They always travel together and are always derived from one another — `line` is the
+/// rendered packet, `packet` is that line parsed, `parsed` is its payload classified — so
+/// passing them as one borrow keeps the signature honest about that, and stops a caller
+/// handing over a `line` that is not the packet beside it.
+///
+/// Nothing here is cloned. The `Arc<str>` is cloned once per *recipient*, which is the whole
+/// reason it is an `Arc`.
+#[derive(Debug)]
+pub struct Outbound<'a> {
+    pub packet: &'a Tnc2Packet<'a>,
+    pub parsed: &'a ParsedPayload<'a>,
+    /// The rendered line, exactly as it goes on the wire without its CR/LF.
+    pub line: &'a Arc<str>,
+}
+
 /// Every connected client.
 #[derive(Debug, Default)]
 pub struct ClientRegistry {
     clients: DashMap<ClientId, Arc<Client>>,
     next_id: AtomicU64,
+    /// How many clients are on a `dupefeed` port.
+    ///
+    /// Kept as a counter rather than derived by scanning, because it is read on the
+    /// *duplicate* path — which on a busy server is ten percent of everything arriving. A
+    /// scan of the map per duplicate would cost more than the fan-out it is trying to avoid.
+    /// Almost every server has no dupefeed port at all, and this makes that case one relaxed
+    /// load and nothing else, the same way `publish_packet` handles the live feed.
+    dupefeed_clients: AtomicU64,
 }
 
 impl ClientRegistry {
@@ -126,6 +195,7 @@ impl ClientRegistry {
             remote: registration.remote,
             listener: registration.listener,
             port_kind: registration.port_kind,
+            connection: registration.connection,
             software: registration.software,
             verified: registration.verified,
             connected_at: registration.connected_at,
@@ -135,18 +205,37 @@ impl ClientRegistry {
             filter_locked: registration.filter_locked,
             outbox: registration.outbox,
         });
+        if client.wants_duplicates() {
+            self.dupefeed_clients.fetch_add(1, Ordering::Relaxed);
+        }
         self.clients.insert(id, Arc::clone(&client));
         client
     }
 
     /// Remove a client.
     pub fn remove(&self, id: ClientId) -> Option<Arc<Client>> {
-        self.clients.remove(&id).map(|(_, client)| client)
+        let removed = self.clients.remove(&id).map(|(_, client)| client);
+        if removed
+            .as_ref()
+            .is_some_and(|client| client.wants_duplicates())
+        {
+            self.dupefeed_clients.fetch_sub(1, Ordering::Relaxed);
+        }
+        removed
     }
 
     #[must_use]
     pub fn get(&self, id: ClientId) -> Option<Arc<Client>> {
         self.clients.get(&id).map(|entry| Arc::clone(entry.value()))
+    }
+
+    /// Whether a connection is still registered.
+    ///
+    /// Cheaper than [`ClientRegistry::get`] when the answer is all that is wanted: no `Arc`
+    /// clone. Used by the gated-station table's pruning, which asks it once per entry.
+    #[must_use]
+    pub fn contains(&self, id: ClientId) -> bool {
+        self.clients.contains_key(&id)
     }
 
     #[must_use]
@@ -160,15 +249,21 @@ impl ClientRegistry {
     }
 
     /// How many clients are connected to a named listener.
+    ///
+    /// Uplinks are excluded. They are in the registry so that fan-out sees them, but they
+    /// are not clients of a port and must not count against its `max_clients`.
     #[must_use]
     pub fn count_on_listener(&self, listener: &str) -> usize {
         self.clients
             .iter()
-            .filter(|entry| entry.value().listener.as_ref() == listener)
+            .filter(|entry| {
+                let client = entry.value();
+                !client.connection.is_uplink() && client.listener.as_ref() == listener
+            })
             .count()
     }
 
-    /// Every client, ordered by connection time so the dashboard is stable between polls.
+    /// Every connection, ordered by connection time so the dashboard is stable between polls.
     #[must_use]
     pub fn snapshot(&self) -> Vec<Arc<Client>> {
         let mut clients: Vec<Arc<Client>> =
@@ -177,19 +272,60 @@ impl ClientRegistry {
         clients
     }
 
-    /// Deliver a packet to every client whose filter accepts it.
+    /// Every connection that is a client rather than an uplink.
+    #[must_use]
+    pub fn clients(&self) -> Vec<Arc<Client>> {
+        let mut clients = self.snapshot();
+        clients.retain(|client| !client.connection.is_uplink());
+        clients
+    }
+
+    /// The client logged in as `callsign`, if one is connected.
     ///
-    /// The originating client is skipped: APRS-IS does not echo a packet back to the
-    /// station that submitted it.
+    /// The first half of the messaging rule at <http://www.aprs-is.net/ServerDesign.aspx>:
+    /// "the client receive any APRS messages destined for the client". Uplinks are excluded —
+    /// an uplink's registry callsign is the *upstream server's* identity, and a message
+    /// addressed to a server callsign is not a message for that link.
+    ///
+    /// Case-insensitive, because the addressee comes out of a packet payload and nothing
+    /// validates that. A linear scan: it runs only for message packets, which are a small
+    /// fraction of the feed, and the alternative is a second index to keep in step with
+    /// every connect and disconnect for no measurable gain.
+    #[must_use]
+    pub fn id_of_callsign(&self, callsign: &str) -> Option<ClientId> {
+        self.clients
+            .iter()
+            .find(|entry| {
+                let client = entry.value();
+                !client.connection.is_uplink() && client.callsign.eq_ignore_ascii_case(callsign)
+            })
+            .map(|entry| entry.value().id)
+    }
+
+    /// Deliver a packet to every client whose filter accepts it, plus `required`.
+    ///
+    /// The source is skipped: APRS-IS does not echo a packet back to the station that
+    /// submitted it, and an uplink that received its own traffic back would loop until the
+    /// duplicate checker or the q algorithm broke the cycle — which it would, but only after
+    /// the packet had crossed the link twice.
+    ///
+    /// `required` is the messaging obligation from
+    /// <http://www.aprs-is.net/ServerDesign.aspx> — the clients that must receive this
+    /// packet whatever their filter says, worked out by [`crate::heard`]. It is passed in as
+    /// a slice rather than looked up here so that the registry keeps knowing only about
+    /// filters: a message reaching a client that did not ask for it is a delivery decision,
+    /// not a matching one, and folding it into `accepts` would make the filter tests lie.
+    ///
+    /// Almost always empty, and checked with a `contains` over a list of at most a handful.
     pub fn broadcast(
         &self,
-        packet: &Tnc2Packet<'_>,
-        parsed: &ParsedPayload<'_>,
-        line: &Arc<str>,
+        outbound: &Outbound<'_>,
         origin: Option<ClientId>,
+        required: &[ClientId],
         positions: &dyn PositionSource,
         metrics: &Metrics,
     ) {
+        let line = outbound.line;
         let bytes = line.len() as u64 + 2; // the CRLF the writer appends
 
         for entry in &self.clients {
@@ -197,7 +333,9 @@ impl ClientRegistry {
             if Some(client.id) == origin {
                 continue;
             }
-            if !accepts(client, packet, parsed, positions) {
+            if !required.contains(&client.id)
+                && !accepts(client, outbound.packet, outbound.parsed, positions)
+            {
                 continue;
             }
 
@@ -216,27 +354,79 @@ impl ClientRegistry {
     }
 }
 
-/// Whether one client should receive a packet.
+impl ClientRegistry {
+    /// Deliver a packet that duplicate detection suppressed, to `dupefeed` clients only.
+    ///
+    /// A duplicate is not relayed, but it is not nothing: it is the only evidence of how a
+    /// transmission propagated — which IGates heard it, and by what path — and that is the
+    /// question a `dupefeed` port exists to answer. Three properties matter:
+    ///
+    /// * **Verbatim.** No q construct is applied. The packet did not enter APRS-IS here and
+    ///   must not carry a claim that it did, and the path it arrived with is the data.
+    /// * **No filters.** A `dupefeed` client is a diagnostic tool; filtering the diagnostic
+    ///   by the same rules as the live feed would hide exactly the copies being looked for.
+    /// * **Nothing when nobody is listening.** The check below is one relaxed load, so a
+    ///   server with no such port pays that and no allocation on every duplicate.
+    pub fn broadcast_duplicate(&self, line: &str, origin: Option<ClientId>, metrics: &Metrics) {
+        if self.dupefeed_clients.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+
+        let rendered: Arc<str> = Arc::from(line);
+        let bytes = rendered.len() as u64 + 2;
+
+        for entry in &self.clients {
+            let client = entry.value();
+            if !client.wants_duplicates() || Some(client.id) == origin {
+                continue;
+            }
+            if client.try_send(Arc::clone(&rendered)) {
+                Metrics::incr(&client.counters.packets_sent);
+                Metrics::add(&client.counters.bytes_sent, bytes);
+                Metrics::incr(&metrics.packets_sent);
+                Metrics::add(&metrics.bytes_sent, bytes);
+            } else {
+                Metrics::incr(&client.counters.packets_dropped);
+                Metrics::incr(&metrics.packets_dropped_slow);
+            }
+        }
+    }
+
+    /// How many clients are watching the duplicate feed. For the dashboard and for tests.
+    #[must_use]
+    pub fn dupefeed_clients(&self) -> u64 {
+        self.dupefeed_clients.load(Ordering::Relaxed)
+    }
+}
+
+/// Whether one connection should receive a packet.
 fn accepts(
     client: &Client,
     packet: &Tnc2Packet<'_>,
     parsed: &ParsedPayload<'_>,
     positions: &dyn PositionSource,
 ) -> bool {
-    match client.port_kind {
-        // A full feed carries everything that survived duplicate filtering.
-        PortKind::FullFeed => true,
-        // Submission-only and duplicate-diagnostic ports never receive the live feed.
-        PortKind::UdpSubmit | PortKind::DupeFeed => false,
-        PortKind::Igate => {
-            let chain = client.filter();
-            chain.matches(&MatchContext {
-                packet,
-                parsed,
-                client: Some(&client.callsign),
-                positions,
-            })
-        }
+    match client.connection {
+        // An uplink carries this server's whole contribution upstream, or nothing at all.
+        // There is no filtered middle ground: a server that forwarded only part of what it
+        // heard would make the packets it withheld invisible to the rest of APRS-IS, and
+        // nothing downstream could tell that from the packets simply not existing.
+        ConnectionKind::Uplink { transmit } => transmit,
+        ConnectionKind::Client => match client.port_kind {
+            // A full feed carries everything that survived duplicate filtering.
+            PortKind::FullFeed => true,
+            // Submission-only and duplicate-diagnostic ports never receive the live feed.
+            PortKind::UdpSubmit | PortKind::DupeFeed => false,
+            PortKind::Igate => {
+                let chain = client.filter();
+                chain.matches(&MatchContext {
+                    packet,
+                    parsed,
+                    client: Some(&client.callsign),
+                    positions,
+                })
+            }
+        },
     }
 }
 
@@ -260,6 +450,7 @@ mod tests {
                 remote: "192.0.2.1:1234".parse().expect("valid address"),
                 listener: listener.into(),
                 port_kind: kind,
+                connection: ConnectionKind::Client,
                 software: None,
                 verified: true,
                 connected_at: 1_700_000_000,
@@ -276,7 +467,17 @@ mod tests {
         let packet = Tnc2Packet::parse(raw).expect("valid packet");
         let parsed = aprs::parse(&packet);
         let line: Arc<str> = Arc::from(raw);
-        registry.broadcast(&packet, &parsed, &line, None, &NoPositions, metrics);
+        registry.broadcast(
+            &Outbound {
+                packet: &packet,
+                parsed: &parsed,
+                line: &line,
+            },
+            None,
+            &[],
+            &NoPositions,
+            metrics,
+        );
     }
 
     #[test]
@@ -353,10 +554,13 @@ mod tests {
         let parsed = aprs::parse(&packet);
         let line: Arc<str> = Arc::from(BEACON);
         registry.broadcast(
-            &packet,
-            &parsed,
-            &line,
+            &Outbound {
+                packet: &packet,
+                parsed: &parsed,
+                line: &line,
+            },
             Some(client.id),
+            &[],
             &NoPositions,
             &metrics,
         );
@@ -407,6 +611,7 @@ mod tests {
             remote: "192.0.2.1:1234".parse().expect("valid address"),
             listener: "full".into(),
             port_kind: PortKind::FullFeed,
+            connection: ConnectionKind::Client,
             software: None,
             verified: true,
             connected_at: 0,
@@ -426,6 +631,215 @@ mod tests {
             "only the queued packet counts as sent"
         );
         assert_eq!(snapshot.packets_dropped_slow, 2);
+    }
+
+    /// An uplink is in the registry so that fan-out reaches it. What it receives is decided
+    /// by whether it may transmit, not by a filter — a server that forwarded only part of
+    /// what it heard would make the rest invisible to the network.
+    #[test]
+    fn a_transmitting_uplink_receives_everything_relayed() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (mut r, mut rx) = registration("Core rotate", PortKind::FullFeed, "");
+        r.connection = ConnectionKind::Uplink { transmit: true };
+        registry.insert(r);
+
+        broadcast(&registry, &metrics, BEACON);
+        assert_eq!(rx.try_recv().as_deref(), Ok(BEACON));
+    }
+
+    #[test]
+    fn a_read_only_uplink_receives_nothing() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (mut r, mut rx) = registration("Core rotate", PortKind::FullFeed, "");
+        r.connection = ConnectionKind::Uplink { transmit: false };
+        registry.insert(r);
+
+        broadcast(&registry, &metrics, BEACON);
+        assert!(rx.try_recv().is_err(), "a ro uplink never transmits");
+        assert_eq!(metrics.snapshot().packets_sent, 0);
+    }
+
+    /// A packet that arrived over an uplink must not be sent straight back up it.
+    #[test]
+    fn an_uplink_is_skipped_for_its_own_traffic() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (mut r, mut rx) = registration("Core rotate", PortKind::FullFeed, "");
+        r.connection = ConnectionKind::Uplink { transmit: true };
+        let uplink = registry.insert(r);
+
+        let packet = Tnc2Packet::parse(BEACON).expect("valid packet");
+        let parsed = aprs::parse(&packet);
+        let line: Arc<str> = Arc::from(BEACON);
+        registry.broadcast(
+            &Outbound {
+                packet: &packet,
+                parsed: &parsed,
+                line: &line,
+            },
+            Some(uplink.id),
+            &[],
+            &NoPositions,
+            &metrics,
+        );
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// An uplink holds a descriptor but is not a client of a port, so it must not count
+    /// against that port's `max_clients` — which would let a full port refuse the uplink.
+    #[test]
+    fn uplinks_do_not_count_against_a_listener_cap() {
+        let registry = ClientRegistry::new();
+        let (client, _rc) = registration("Clients", PortKind::Igate, "t/p");
+        let (mut uplink, _ru) = registration("Clients", PortKind::FullFeed, "");
+        uplink.connection = ConnectionKind::Uplink { transmit: true };
+        registry.insert(client);
+        registry.insert(uplink);
+
+        assert_eq!(registry.count_on_listener("Clients"), 1);
+        assert_eq!(registry.len(), 2, "both are in the registry");
+        assert_eq!(registry.clients().len(), 1, "only one is a client");
+        assert_eq!(registry.snapshot().len(), 2);
+    }
+
+    // --- the duplicate feed -------------------------------------------------------------
+
+    const DUPLICATE: &str = "OH7LZB>APRS,WIDE1-1,OH2RCH-10*,qAR,OH2RCH-10:>heard twice";
+
+    fn broadcast_duplicate(registry: &ClientRegistry, metrics: &Metrics, raw: &str) {
+        registry.broadcast_duplicate(raw, None, metrics);
+    }
+
+    /// A duplicate is the only evidence of how a transmission propagated, which is the
+    /// question a `dupefeed` port exists to answer.
+    #[test]
+    fn a_dupefeed_client_receives_suppressed_duplicates() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (r, mut rx) = registration("dupes", PortKind::DupeFeed, "");
+        registry.insert(r);
+        assert_eq!(registry.dupefeed_clients(), 1);
+
+        broadcast_duplicate(&registry, &metrics, DUPLICATE);
+        assert_eq!(rx.try_recv().as_deref(), Ok(DUPLICATE));
+    }
+
+    /// Verbatim: no q construct, no rewriting. The packet did not enter APRS-IS here, and
+    /// the path it arrived with is the whole point of looking at it.
+    #[test]
+    fn a_duplicate_is_delivered_exactly_as_it_arrived() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (r, mut rx) = registration("dupes", PortKind::DupeFeed, "");
+        registry.insert(r);
+
+        broadcast_duplicate(&registry, &metrics, DUPLICATE);
+        let delivered = rx.try_recv().expect("delivered");
+        assert_eq!(delivered.as_ref(), DUPLICATE);
+        assert!(!delivered.contains("T2TEST"), "no construct was applied");
+    }
+
+    /// A `dupefeed` client is a diagnostic tool. Filtering the diagnostic by the same rules
+    /// as the live feed would hide exactly the copies somebody is looking for.
+    #[test]
+    fn a_dupefeed_client_gets_everything_regardless_of_its_filter() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (r, mut rx) = registration("dupes", PortKind::DupeFeed, "b/N0SPAM");
+        registry.insert(r);
+
+        broadcast_duplicate(&registry, &metrics, DUPLICATE);
+        assert_eq!(rx.try_recv().as_deref(), Ok(DUPLICATE));
+    }
+
+    /// Nobody else does. A duplicate reaching an ordinary client would be the duplicate
+    /// detection failing to do its job.
+    #[test]
+    fn no_other_port_kind_receives_a_duplicate() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (full, mut full_rx) = registration("full", PortKind::FullFeed, "");
+        let (igate, mut igate_rx) = registration("igate", PortKind::Igate, "t/p");
+        let (mut uplink, mut uplink_rx) = registration("Core", PortKind::FullFeed, "");
+        uplink.connection = ConnectionKind::Uplink { transmit: true };
+        let (dupes, mut dupes_rx) = registration("dupes", PortKind::DupeFeed, "");
+        registry.insert(full);
+        registry.insert(igate);
+        registry.insert(uplink);
+        registry.insert(dupes);
+
+        broadcast_duplicate(&registry, &metrics, DUPLICATE);
+
+        assert!(full_rx.try_recv().is_err(), "a full feed got a duplicate");
+        assert!(
+            igate_rx.try_recv().is_err(),
+            "an igate client got a duplicate"
+        );
+        assert!(
+            uplink_rx.try_recv().is_err(),
+            "a duplicate went upstream, where it would be relayed as fresh"
+        );
+        assert!(dupes_rx.try_recv().is_ok());
+    }
+
+    /// The live feed and the duplicate feed are separate paths and must not cross.
+    #[test]
+    fn a_dupefeed_client_receives_nothing_from_the_live_feed() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (r, mut rx) = registration("dupes", PortKind::DupeFeed, "");
+        registry.insert(r);
+
+        broadcast(&registry, &metrics, BEACON);
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// The counter is what keeps the duplicate path free on a server with no such port —
+    /// the common case, and the one where duplicates are ten percent of all traffic.
+    #[test]
+    fn a_server_with_no_dupefeed_port_does_no_work_per_duplicate() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (r, mut rx) = registration("full", PortKind::FullFeed, "");
+        registry.insert(r);
+        assert_eq!(registry.dupefeed_clients(), 0);
+
+        broadcast_duplicate(&registry, &metrics, DUPLICATE);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(metrics.snapshot().packets_sent, 0);
+    }
+
+    /// The count has to come back down, or a server that once had a dupefeed client keeps
+    /// paying for the fan-out forever.
+    #[test]
+    fn the_dupefeed_count_follows_connections_both_ways() {
+        let registry = ClientRegistry::new();
+        let (r, _rx) = registration("dupes", PortKind::DupeFeed, "");
+        let client = registry.insert(r);
+        assert_eq!(registry.dupefeed_clients(), 1);
+
+        registry.remove(client.id);
+        assert_eq!(registry.dupefeed_clients(), 0);
+
+        // A second removal of the same id must not take it negative.
+        registry.remove(client.id);
+        assert_eq!(registry.dupefeed_clients(), 0);
+    }
+
+    /// A duplicate submitted by a dupefeed client is not sent back to it, for the same
+    /// reason the live feed skips its source.
+    #[test]
+    fn the_source_of_a_duplicate_is_skipped() {
+        let registry = ClientRegistry::new();
+        let metrics = Metrics::new();
+        let (r, mut rx) = registration("dupes", PortKind::DupeFeed, "");
+        let client = registry.insert(r);
+
+        registry.broadcast_duplicate(DUPLICATE, Some(client.id), &metrics);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

@@ -35,6 +35,112 @@ fn loads_a_minimal_configuration_and_applies_defaults() {
         "TCP is the default protocol"
     );
     assert!(!listener.hidden);
+    assert_eq!(listener.dual_stack, None);
+}
+
+// --- dual-stack listeners ------------------------------------------------------------
+
+/// An IPv6 bind accepts IPv4 unless the operator says otherwise; an IPv4 bind never has
+/// anything to decide. The default matters: `[::]` means "everyone" to the person who
+/// typed it, and before this was set explicitly the answer depended on the kernel.
+#[rstest]
+#[case("[::]:14580", None, true)] // the default an operator gets by writing `[::]`
+#[case("[::]:14580", Some(true), true)] // asked for, spelled out
+#[case("[::]:14580", Some(false), false)] // IPv6 only, deliberately
+#[case("0.0.0.0:14580", None, false)] // an IPv4 socket has no second family to accept
+#[case("0.0.0.0:14580", Some(true), false)] // and cannot be talked into one
+#[case("127.0.0.1:14580", None, false)]
+fn dual_stack_applies_only_to_ipv6_binds(
+    #[case] bind: &str,
+    #[case] dual_stack: Option<bool>,
+    #[case] expected: bool,
+) {
+    let setting = match dual_stack {
+        Some(value) => format!("dual_stack = {value}"),
+        None => String::new(),
+    };
+    let config = Config::from_toml(&format!(
+        r#"
+[server]
+id = "N0CALL-1"
+
+[[listen]]
+name = "Client-Defined Filters"
+kind = "igate"
+bind = "{bind}"
+{setting}
+"#
+    ))
+    .expect("valid");
+
+    let listener = config.listeners.first().expect("one listener");
+    assert_eq!(listener.wants_dual_stack(), expected);
+}
+
+// --- the administrative token --------------------------------------------------------
+
+/// Closed by default. The status port has no other authentication, so an endpoint that
+/// changes server state must not be reachable merely because the port is.
+#[rstest]
+#[case(None, "anything", false)] // nothing configured: nothing is accepted
+#[case(None, "", false)] // not even the empty string
+#[case(Some("s3cret"), "s3cret", true)]
+#[case(Some("s3cret"), "wrong", false)]
+#[case(Some("s3cret"), "s3cre", false)] // a prefix is not a match
+#[case(Some("s3cret"), "s3crett", false)] // nor is an extension
+#[case(Some("s3cret"), "S3CRET", false)] // and it is case-sensitive
+#[case(Some("s3cret"), "", false)]
+fn the_admin_token_is_closed_by_default_and_matched_exactly(
+    #[case] configured: Option<&str>,
+    #[case] presented: &str,
+    #[case] expected: bool,
+) {
+    let http = Http {
+        admin_token: configured.map(ToOwned::to_owned),
+        ..Http::default()
+    };
+    assert_eq!(http.admin_token_matches(presented), expected);
+}
+
+/// A missing `[http]` table and an empty one must produce the same configuration.
+///
+/// They very nearly did not. `Config.http` is `#[serde(default)]`, so a file with no
+/// `[http]` section is built by `Http::default()` — which does not run the per-field
+/// `#[serde(default = ...)]` functions. With a derived `Default` the map tile URL was empty
+/// in the first case and correct in the second, and nothing in either file hinted at why.
+#[test]
+fn a_missing_http_section_and_an_empty_one_agree() {
+    let without = Config::from_toml(MINIMAL).expect("valid");
+    let with_empty = Config::from_toml(&format!("{MINIMAL}\n[http]\n")).expect("valid");
+
+    assert_eq!(without.http, with_empty.http);
+    assert!(
+        !without.http.map_tile_url.is_empty(),
+        "the shipped default reaches a server with no [http] section"
+    );
+    assert_eq!(without.http, Http::default());
+}
+
+#[test]
+fn the_admin_token_is_read_from_the_configuration() {
+    let config = Config::from_toml(
+        r#"
+[server]
+id = "N0CALL-1"
+
+[http]
+admin_token = "s3cret"
+
+[[listen]]
+name = "Client-Defined Filters"
+kind = "igate"
+bind = "[::]:14580"
+"#,
+    )
+    .expect("valid");
+
+    assert!(config.http.admin_token_matches("s3cret"));
+    assert!(!config.http.admin_token_matches("nope"));
 }
 
 #[test]

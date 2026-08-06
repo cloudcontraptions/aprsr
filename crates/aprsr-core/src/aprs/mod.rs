@@ -35,6 +35,13 @@ impl PacketType {
     pub const USER_DEFINED: Self = Self(1 << 7);
     pub const NWS: Self = Self(1 << 8);
     pub const WEATHER: Self = Self(1 << 9);
+    /// A Citizen Weather Observer Program station.
+    ///
+    /// Undocumented; `t/c` is not in the letter set at
+    /// <http://www.aprs-is.net/javAPRSFilter.aspx>, which lists only `poimqstunw`. aprsc
+    /// accepts it, so a client filter string that works against the reference server would
+    /// otherwise be an error here, which is a compatibility break rather than strictness.
+    pub const CWOP: Self = Self(1 << 10);
 
     /// The filter letter for a single category, per `t/poimqstunw`.
     #[must_use]
@@ -50,6 +57,8 @@ impl PacketType {
             b'u' => Self::USER_DEFINED,
             b'n' => Self::NWS,
             b'w' => Self::WEATHER,
+            // Not in the specification's letter set; see `PacketType::CWOP`.
+            b'c' => Self::CWOP,
             _ => return None,
         })
     }
@@ -192,6 +201,10 @@ pub fn parse<'a>(packet: &Tnc2Packet<'a>) -> ParsedPayload<'a> {
         out.types |= PacketType::NWS;
     }
 
+    if is_cwop(packet) {
+        out.types |= PacketType::CWOP;
+    }
+
     out
 }
 
@@ -225,6 +238,33 @@ fn apply_position(out: &mut ParsedPayload<'_>, data: &str) {
 /// callsigns beginning `NWS`, `SKY` or `CWA`, and their bulletins are addressed to the
 /// same prefixes. This is a heuristic over those conventions rather than a specified
 /// format; see `docs/protocol.md`.
+/// Whether a station belongs to the Citizen Weather Observer Program.
+///
+/// Undocumented; inferred from the callsigns the programme issues, which are two letters
+/// and then digits — `CW`, `DW` and `EW` series, as in `CW0342`. Like [`is_nws`] this is a
+/// convention rather than anything the packet declares, so it is a heuristic over
+/// callsigns and is documented as such in `docs/protocol.md`.
+///
+/// The digit test matters: `CWA` is a National Weather Service prefix, not a CWOP one, and
+/// without it every NWS `CWA` station would also be reported as CWOP.
+fn is_cwop(packet: &Tnc2Packet<'_>) -> bool {
+    const PREFIXES: [&str; 3] = ["CW", "DW", "EW"];
+    // Compared case-insensitively for the same reason the rest of this module is: it costs
+    // nothing and does not depend on a caller's guarantee. In practice a source callsign
+    // here is always upper case, because `Tnc2Packet::parse` rejects one that is not.
+    let call = packet.source();
+    // The base callsign only: an SSID says nothing about who issued the call.
+    let base = call.split('-').next().unwrap_or(call);
+    let Some(head) = base.get(..2) else {
+        return false;
+    };
+    if !PREFIXES.iter().any(|p| head.eq_ignore_ascii_case(p)) {
+        return false;
+    }
+    let rest = base.get(2..).unwrap_or_default();
+    !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+}
+
 fn is_nws(packet: &Tnc2Packet<'_>, parsed: &ParsedPayload<'_>) -> bool {
     const PREFIXES: [&str; 3] = ["NWS", "SKY", "CWA"];
     let has_prefix = |call: &str| {
@@ -389,5 +429,48 @@ mod tests {
             let Ok(packet) = Tnc2Packet::parse(&raw) else { return Ok(()) };
             let _ = parse(&packet);
         }
+    }
+}
+
+#[cfg(test)]
+mod cwop_tests {
+    use super::*;
+    use rstest::rstest;
+
+    fn types_of(raw: &str) -> PacketType {
+        let packet = Tnc2Packet::parse(raw).expect("valid packet");
+        parse(&packet).types
+    }
+
+    /// CWOP callsigns are a two-letter series followed by digits. This is a convention, not
+    /// anything the packet declares, which is why it lives beside the NWS heuristic and is
+    /// documented as approximate.
+    #[rstest]
+    #[case("CW0342>APRS,TCPIP*:=4903.50N/07201.75W_000/000g000t077", true)] // CW series
+    #[case("DW1234>APRS,TCPIP*:=4903.50N/07201.75W_000/000g000t077", true)] // DW series
+    #[case("EW9999>APRS,TCPIP*:=4903.50N/07201.75W_000/000g000t077", true)] // EW series
+    #[case("CW0342-1>APRS,TCPIP*:>an SSID says nothing about the issuer", true)]
+    // `CWA` is a National Weather Service prefix. Without the digit test every NWS CWA
+    // station would be reported as CWOP as well, which is the one way this can go wrong.
+    #[case("CWA123>APRS,TCPIP*:>a weather service station", false)]
+    #[case("OH7LZB>APRS,TCPIP*:>an ordinary station", false)]
+    #[case("CW>APRS,TCPIP*:>letters with no digits", false)]
+    #[case("N0CALL>APRS,TCPIP*:>not the series", false)]
+    fn recognises_cwop_stations(#[case] raw: &str, #[case] expected: bool) {
+        assert_eq!(types_of(raw).contains(PacketType::CWOP), expected);
+    }
+
+    /// `CWA` must still be recognised as NWS — adding CWOP must not have taken it away.
+    #[test]
+    fn a_weather_service_station_is_still_nws_and_not_cwop() {
+        let types = types_of("CWA123>APRS,TCPIP*:>a weather service station");
+        assert!(types.contains(PacketType::NWS));
+        assert!(!types.contains(PacketType::CWOP));
+    }
+
+    /// The filter letter is what makes this reachable from a client.
+    #[test]
+    fn the_c_filter_letter_selects_cwop() {
+        assert_eq!(PacketType::from_filter_letter(b'c'), Some(PacketType::CWOP));
     }
 }

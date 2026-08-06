@@ -18,17 +18,17 @@ use aprsr_core::packet::MAX_PACKET_LEN;
 use aprsr_core::passcode::Verification;
 use aprsr_store::NewSession;
 use futures_util::StreamExt;
-use tokio::io::{AsyncWriteExt, BufWriter};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf};
 use tokio::sync::mpsc;
 use tokio_util::codec::FramedRead;
 
 use crate::codec::{Line, LineCodec};
-use crate::dispatch::{Dispatcher, Ingest};
+use crate::dispatch::{Dispatcher, Ingest, IngestSource};
 use crate::listener::ListenerContext;
 use crate::metrics::Metrics;
-use crate::registry::{Client, Registration};
+use crate::registry::{Client, ConnectionKind, Registration};
 use crate::{ServerState, Shutdown, now_secs};
+use aprsr_core::qconstruct::QEntry;
 
 /// How long a client has to send its login line before the connection is dropped.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -36,28 +36,43 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the writer is given to say goodbye when the server is shutting down.
 const FAREWELL_GRACE: Duration = Duration::from_secs(2);
 
+/// Whether aprsr's listening ports are *client-only ports* in the q algorithm's sense.
+///
+/// They are not, and this is a constant rather than a property of [`PortKind`] because the
+/// answer is the same for all four and the reasoning belongs in one place.
+///
+/// <http://www.aprs-is.net/qalgorithm.aspx> gates its downgrade rules — `qAR`/`qAr` to
+/// `qAo`, `qAS`/`qAC` to `qAO` — on the packet having "entered the server from a verified
+/// client-only connection", but never defines the term. The live network does: `qAR`
+/// constructs whose callsign differs from the packet's source are the most common shape on
+/// APRS-IS, and every one of them would have been downgraded to `qAo` at its first server if
+/// the ordinary filtered port were client-only.
+///
+/// Undocumented; inferred from observed behaviour of the core servers. See
+/// [`aprsr_core::qconstruct::QContext::client_only`], where the rules themselves live.
+const CLIENT_ONLY_PORT: bool = false;
+
 /// Serve one accepted connection until it closes or the server shuts down.
-pub async fn serve(
-    socket: TcpStream,
+///
+/// Generic over the transport so a plaintext `TcpStream` and a `TlsStream` wrapping one go
+/// through exactly the same code. Everything about APRS-IS above the socket is identical on
+/// the two, and having one implementation is what stops the TLS port quietly diverging from
+/// the plaintext one.
+///
+/// The peer address is passed in rather than read from the stream: by the time a TLS
+/// handshake has completed the address is buried behind the wrapper, and the checks that
+/// depend on it — the access list above all — should have happened long before that. See
+/// `accept_loop`, which does them.
+pub async fn serve<S>(
+    stream: S,
+    peer: std::net::SocketAddr,
     listener: Arc<ListenerContext>,
     state: Arc<ServerState>,
     dispatcher: Dispatcher,
-    shutdown: Shutdown,
-) {
-    let peer = match socket.peer_addr() {
-        Ok(addr) => addr,
-        Err(error) => {
-            tracing::debug!(%error, "connection vanished before it could be served");
-            return;
-        }
-    };
-
-    // Disable Nagle: APRS packets are small and latency-sensitive, and coalescing them
-    // into larger segments only adds delay.
-    if let Err(error) = socket.set_nodelay(true) {
-        tracing::debug!(%error, %peer, "could not disable Nagle's algorithm");
-    }
-
+    mut shutdown: Shutdown,
+) where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
     if let Some(limit) = listener.max_clients
         && state.registry.count_on_listener(&listener.name) >= limit
     {
@@ -65,47 +80,16 @@ pub async fn serve(
         return;
     }
 
-    let (reader, writer) = socket.into_split();
+    let (reader, writer) = tokio::io::split(stream);
     let mut lines = FramedRead::new(reader, LineCodec::with_max_length(MAX_PACKET_LEN));
     let mut writer = BufWriter::new(writer);
 
-    // 1. The banner, before the client says anything.
-    let banner = Banner {
-        software: crate::SOFTWARE_NAME,
-        version: crate::VERSION,
-        server_id: &state.server_id,
-    };
-    if write_line(&mut writer, &banner.to_string()).await.is_err() {
-        return;
-    }
-
-    // 2. The login line.
-    let Some(login) = read_login(&mut lines).await else {
-        Metrics::incr(&state.metrics.logins_rejected);
+    let Some((login, verification)) =
+        handshake(&mut lines, &mut writer, peer, &state, &mut shutdown).await
+    else {
         return;
     };
-
-    let verification = login.verify();
     let callsign: Arc<str> = Arc::from(login.callsign.as_str());
-
-    // 3. The acknowledgement. An invalid passcode is answered rather than dropped: the
-    //    connection stays usable read-only, which is what a misconfigured client needs to
-    //    see in order to diagnose itself.
-    let response = LoginResponse {
-        callsign: &callsign,
-        verification,
-        server_id: &state.server_id,
-    };
-    if write_line(&mut writer, &response.to_string())
-        .await
-        .is_err()
-    {
-        return;
-    }
-    if verification == Verification::Invalid {
-        Metrics::incr(&state.metrics.logins_rejected);
-        tracing::info!(%peer, callsign = %callsign, "login with an invalid passcode, continuing read-only");
-    }
 
     let (client, outbox_rx) =
         register(&login, verification, &callsign, peer, &listener, &state).await;
@@ -121,10 +105,20 @@ pub async fn serve(
     );
 
     // 4. The feed, in one task, and the client's submissions in this one.
+    //
+    //    A login carrying `UDP <port>` asks for the feed over UDP, per
+    //    <http://www.aprs-is.net/Connecting.aspx>. The TCP connection stays exactly as it
+    //    is — submissions, filter commands and keepalives all still travel over it — and
+    //    only the direction carrying packets moves.
+    let udp_feed = udp_feed_for(&login, peer, &state);
+    if let Some(feed) = &udp_feed {
+        tracing::info!(%peer, callsign = %callsign, target = %feed.target(), "delivering the feed over UDP");
+    }
     let mut writer_task = tokio::spawn(write_feed(
         writer,
         outbox_rx,
         Arc::clone(&state),
+        udp_feed,
         shutdown.clone(),
     ));
 
@@ -149,6 +143,71 @@ pub async fn serve(
 
     disconnect(&client, &state).await;
     tracing::info!(%peer, callsign = %callsign, "client disconnected");
+}
+
+/// Run the three-line handshake, returning the login when the client may proceed.
+///
+/// Per <http://www.aprs-is.net/Connecting.aspx>: banner, login line, acknowledgement. The
+/// callsign blocklist sits between the second and the third, because the login is the first
+/// moment the callsign is known.
+async fn handshake<S>(
+    lines: &mut FramedRead<ReadHalf<S>, LineCodec>,
+    writer: &mut BufWriter<WriteHalf<S>>,
+    peer: std::net::SocketAddr,
+    state: &ServerState,
+    shutdown: &mut Shutdown,
+) -> Option<(LoginRequest, Verification)>
+where
+    S: AsyncRead + AsyncWrite,
+{
+    // 1. The banner, before the client says anything.
+    let banner = Banner {
+        software: crate::SOFTWARE_NAME,
+        version: crate::VERSION,
+        server_id: &state.server_id,
+    };
+    write_line(writer, &banner.to_string()).await.ok()?;
+
+    // 2. The login line.
+    let Some(login) = read_login(lines, shutdown).await else {
+        Metrics::incr(&state.metrics.logins_rejected);
+        return None;
+    };
+    let verification = login.verify();
+    let callsign = login.callsign.as_str();
+
+    // Unlike a blocked address, a blocked callsign is *told* it is blocked: the operator's
+    // problem is usually a misconfigured station rather than a hostile one, and a station
+    // that knows it has been refused can be fixed, while one that sees a silent disconnect
+    // files a bug against its own software.
+    if state.access.callsigns.blocks(callsign) {
+        Metrics::incr(&state.metrics.connections_refused);
+        Metrics::incr(&state.metrics.logins_rejected);
+        tracing::info!(%peer, %callsign, "refusing a blocked callsign");
+        let _ = write_line(
+            writer,
+            &format!("# {} {callsign} blocked", crate::SOFTWARE_NAME),
+        )
+        .await;
+        return None;
+    }
+
+    // 3. The acknowledgement. An invalid passcode is answered rather than dropped: the
+    //    connection stays usable read-only, which is what a misconfigured client needs to
+    //    see in order to diagnose itself.
+    let response = LoginResponse {
+        callsign,
+        verification,
+        server_id: &state.server_id,
+    };
+    write_line(writer, &response.to_string()).await.ok()?;
+
+    if verification == Verification::Invalid {
+        Metrics::incr(&state.metrics.logins_rejected);
+        tracing::info!(%peer, %callsign, "login with an invalid passcode, continuing read-only");
+    }
+
+    Some((login, verification))
 }
 
 /// Remove a client from the registry and close its connection log row.
@@ -201,12 +260,13 @@ async fn register(
     )
     .await;
 
-    let (outbox, outbox_rx) = mpsc::channel::<Arc<str>>(state.config.limits.client_queue.max(1));
+    let (outbox, outbox_rx) = mpsc::channel::<Arc<str>>(state.config().limits.client_queue.max(1));
     let client = state.registry.insert(Registration {
         callsign: Arc::clone(callsign),
         remote: peer,
         listener: Arc::clone(&listener.name),
         port_kind: listener.kind,
+        connection: ConnectionKind::Client,
         software,
         verified: verification.may_transmit(),
         connected_at,
@@ -220,13 +280,22 @@ async fn register(
 }
 
 /// Read and parse the login line, within the login timeout.
-async fn read_login(
-    lines: &mut FramedRead<tokio::net::tcp::OwnedReadHalf, LineCodec>,
+///
+/// Raced against shutdown as well as the clock. This task holds a [`crate::dispatch::Dispatcher`]
+/// clone and the dispatch task ends only when the last one is dropped, so without the race a
+/// single connection that says nothing — a health-check probe, a port scanner, a client whose
+/// network vanished between `connect` and `write` — would hold the whole server's shutdown for
+/// the full login timeout.
+async fn read_login<S: AsyncRead>(
+    lines: &mut FramedRead<ReadHalf<S>, LineCodec>,
+    shutdown: &mut Shutdown,
 ) -> Option<LoginRequest> {
     loop {
-        let next = tokio::time::timeout(LOGIN_TIMEOUT, lines.next())
-            .await
-            .ok()??;
+        let next = tokio::select! {
+            next = tokio::time::timeout(LOGIN_TIMEOUT, lines.next()) => next,
+            () = shutdown.wait() => return None,
+        };
+        let next = next.ok()??;
         let line = match next {
             Ok(Line::Text(line)) => line,
             // An oversized or undecodable login is not a login; keep waiting for a real
@@ -302,14 +371,42 @@ async fn open_session_row(
     }
 }
 
+/// Build the UDP feed a login asked for, if it asked for one and the server can provide it.
+///
+/// Returns `None` when the login carried no `UDP` keyword — the overwhelmingly common case —
+/// and also when the server has no UDP socket to send from. Falling back to the TCP feed is
+/// right: the client still gets its packets, just over the transport it did not choose,
+/// which is far better than a connection that silently delivers nothing.
+fn udp_feed_for(
+    login: &LoginRequest,
+    peer: std::net::SocketAddr,
+    state: &ServerState,
+) -> Option<crate::udp::UdpFeed> {
+    let port = login.udp_port?;
+    let Some(socket) = state.udp_out.as_ref() else {
+        tracing::info!(
+            %peer,
+            port,
+            "a client asked for UDP delivery but this server has no UDP socket; \
+             using the TCP feed instead"
+        );
+        return None;
+    };
+    Some(crate::udp::UdpFeed::new(Arc::clone(socket), peer, port))
+}
+
 /// Drain the client's outgoing queue, sending keepalive comment lines while it is idle.
-async fn write_feed(
-    mut writer: BufWriter<tokio::net::tcp::OwnedWriteHalf>,
+///
+/// When `udp_feed` is set the packets go out as datagrams and the TCP connection carries
+/// only the keepalives — which is what makes a stalled UDP client still detectable.
+async fn write_feed<S: AsyncWrite + Send + 'static>(
+    mut writer: BufWriter<WriteHalf<S>>,
     mut outbox: mpsc::Receiver<Arc<str>>,
     state: Arc<ServerState>,
+    udp_feed: Option<crate::udp::UdpFeed>,
     mut shutdown: Shutdown,
 ) {
-    let period = state.config.limits.keepalive_interval.as_duration();
+    let period = state.config().limits.keepalive_interval.as_duration();
     let mut keepalive = tokio::time::interval(period.max(Duration::from_secs(1)));
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The first tick fires immediately; the client has just had the banner and logresp.
@@ -319,6 +416,18 @@ async fn write_feed(
         tokio::select! {
             line = outbox.recv() => {
                 let Some(line) = line else { break };
+
+                if let Some(feed) = &udp_feed {
+                    // One datagram per packet. Coalescing them the way the TCP path does
+                    // would be wrong: a datagram is delivered whole or not at all, so
+                    // packing several together makes one lost datagram lose all of them.
+                    feed.send(&line).await;
+                    while let Ok(next) = outbox.try_recv() {
+                        feed.send(&next).await;
+                    }
+                    continue;
+                }
+
                 if write_line(&mut writer, &line).await.is_err() {
                     break;
                 }
@@ -359,15 +468,22 @@ async fn write_feed(
 }
 
 /// Read the client's submissions until the connection closes.
-async fn read_submissions(
-    lines: &mut FramedRead<tokio::net::tcp::OwnedReadHalf, LineCodec>,
+async fn read_submissions<S: AsyncRead>(
+    lines: &mut FramedRead<ReadHalf<S>, LineCodec>,
     client: &Client,
     listener: &ListenerContext,
     state: &ServerState,
     dispatcher: &Dispatcher,
     mut shutdown: Shutdown,
 ) {
-    let timeout = state.config.limits.client_timeout.as_duration();
+    let timeout = state.config().limits.client_timeout.as_duration();
+
+    // One limiter per connection, owned by the task that reads it — so no lock, and a
+    // client's rate is its own rather than being shared with everyone on its port.
+    let mut limiter = state.access.limiter(now_secs());
+    // Logged once per connection rather than per packet: a client in a loop would otherwise
+    // fill the log faster than it fills the dispatch queue.
+    let mut warned_about_rate = false;
 
     loop {
         let next = tokio::select! {
@@ -419,13 +535,32 @@ async fn read_submissions(
 
         Metrics::incr(&client.counters.packets_received);
 
+        // The rate limit applies to packets, not to the connection: filter commands and
+        // keepalives above are already past. A client over its rate loses the packet and
+        // keeps its connection — disconnecting would turn a beacon interval that is slightly
+        // too short into a reconnect loop, which costs the server more than the packets did.
+        if !limiter.try_take(now_secs()) {
+            Metrics::incr(&state.metrics.packets_rate_limited);
+            Metrics::incr(&client.counters.packets_dropped);
+            if !warned_about_rate {
+                warned_about_rate = true;
+                tracing::info!(
+                    callsign = %client.callsign,
+                    "client is over its submission rate; packets are being dropped"
+                );
+            }
+            continue;
+        }
+
         let submitted = dispatcher.submit(Ingest {
             line,
-            origin: Some(client.id),
+            source: IngestSource::Client(client.id),
             login: Arc::clone(&client.callsign),
             verified: client.verified,
-            via_udp: false,
-            send_only: listener.kind.is_send_only(),
+            entry: QEntry::Verified {
+                send_only: listener.kind.is_send_only(),
+                client_only: CLIENT_ONLY_PORT,
+            },
         });
 
         if !submitted {
@@ -457,8 +592,8 @@ fn apply_filter_command(client: &Client, listener: &ListenerContext, expression:
 }
 
 /// Write one line with the CR/LF terminator APRS-IS requires, and flush.
-async fn write_line(
-    writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
+async fn write_line<S: AsyncWrite>(
+    writer: &mut BufWriter<WriteHalf<S>>,
     line: &str,
 ) -> std::io::Result<()> {
     write_line_buffered(writer, line).await?;
@@ -466,8 +601,8 @@ async fn write_line(
 }
 
 /// Write one line without flushing.
-async fn write_line_buffered(
-    writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
+async fn write_line_buffered<S: AsyncWrite>(
+    writer: &mut BufWriter<WriteHalf<S>>,
     line: &str,
 ) -> std::io::Result<()> {
     writer.write_all(line.as_bytes()).await?;
@@ -487,6 +622,7 @@ mod tests {
             forced_filter: forced.map(|f| FilterChain::parse(f).expect("valid filter")),
             max_clients: None,
             hidden: false,
+            tls: None,
         }
     }
 

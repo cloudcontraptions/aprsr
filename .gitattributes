@@ -1,0 +1,19 @@
+# Line ending policy.
+#
+# Every file in this repository uses LF, in the repository and in the working tree, on
+# every platform. `rustfmt.toml` already sets `newline_style = "Unix"`; this makes git
+# agree with it.
+#
+# This is not cosmetic. `crates/aprsr-web/static/` holds generated assets that are also
+# committed, and CI checks they are current with a plain `git diff --exit-code`. Git's
+# Windows default (`core.autocrlf=true`) rewrites LF to CRLF on checkout, which would make
+# that diff non-empty on every Windows run whether or not anything had actually gone stale.
+# Pinning `eol=lf` means a checkout on Windows, macOS and Linux produces identical bytes.
+* text=auto eol=lf
+
+# The dashboard bundles are produced byte-for-byte by esbuild and Tailwind and compared the
+# same way. Keep git out of their contents entirely rather than trusting the heuristic.
+crates/aprsr-web/static/** -text
+
+# Snapshot files are compared literally by insta; a rewritten line ending is a false diff.
+*.snap -text

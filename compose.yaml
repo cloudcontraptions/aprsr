@@ -1,0 +1,67 @@
+# aprsr under Docker Compose or `podman compose`.
+#
+#   cp aprsr.example.toml aprsr.toml     # then set server.id to your callsign
+#   docker compose up -d
+#   docker compose logs -f
+#
+# Nothing here is required — `docker run` with the same mounts does the same thing. This
+# file exists because it is where an operator will look first, and because it is the
+# shortest way to write down the two mounts and the volume that actually matter.
+
+services:
+  aprsr:
+    build: .
+    image: aprsr:latest
+    restart: unless-stopped
+
+    # Published deliberately one at a time rather than with `network_mode: host`. A server
+    # that quietly claimed every port on the host would be a surprise, and the status
+    # dashboard in particular is bound to loopback here — it has no authentication beyond
+    # the optional admin token, and putting it on a public interface is a decision an
+    # operator should make on purpose.
+    ports:
+      - "14580:14580"   # clients and IGates, user-defined filters
+      - "10152:10152"   # full feed
+      - "127.0.0.1:14501:14501"   # status dashboard — loopback only by default
+
+    volumes:
+      # Read-only: aprsr never writes its configuration, and a reload re-reads this file.
+      - ./aprsr.toml:/etc/aprsr/aprsr.toml:ro
+      # The SQLite database and the station position cache. A named volume rather than a
+      # bind mount so it works the same on a machine with a different uid layout; swap it
+      # for a path if you would rather see the files.
+      - aprsr-data:/var/lib/aprsr
+
+    # The image sets `USER aprsr` already; this makes the intent visible in the one file an
+    # operator reads, and holds even if the image is ever rebuilt from something else.
+    user: "10001:10001"
+
+    # aprsr holds one descriptor per client, and `limits.file_limit` in aprsr.toml can only
+    # raise the soft limit as far as the hard limit allows. Container runtimes default the
+    # hard limit low enough to matter on a busy port.
+    ulimits:
+      nofile:
+        soft: 16384
+        hard: 16384
+
+    # Nothing here needs to write outside the data volume or gain a capability. Neither is
+    # load-bearing for security on its own; both make an unexpected change visible.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # The image's own HEALTHCHECK already covers this; repeating it here means
+    # `docker compose ps` shows the state without anyone having to inspect the image.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/aprsr", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  aprsr-data:

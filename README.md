@@ -11,14 +11,18 @@ network — it accepts client and IGate connections, applies the q construct alg
 suppresses duplicate transmissions, and delivers each client exactly the slice of the feed
 its filters ask for.
 
-> **Early days.** The protocol core is implemented and covered by tests, and the server
-> runs. Uplink and peer connections, TLS and UDP are not in yet — see
+> **Early days.** The protocol core is implemented and covered by tests, the server runs,
+> and it uplinks to the rest of APRS-IS over plain TCP or TLS. See
 > [`docs/roadmap.md`](docs/roadmap.md) for exactly what works today.
 
 ## Getting started
 
 You need a Rust toolchain (1.94 or newer). Nothing else — the dashboard assets are
 committed, so there is no Node build to run first.
+
+> **Windows 11:** Smart App Control blocks unsigned binaries, which includes the
+> proc-macro DLLs `rustc` loads while compiling. The build fails naming a crate rather than
+> the cause — see [`docs/deploy.md`](docs/deploy.md#smart-app-control-blocks-unsigned-binaries).
 
 ```bash
 git clone https://github.com/cloudcontraptions/aprsr
@@ -43,6 +47,15 @@ printf 'user N0CALL pass -1 vers demo 0.1 filter r/60/25/100\r\n' | nc localhost
 
 and open <http://localhost:14501/> for the dashboard.
 
+Or in a container — Docker or Podman, the `Dockerfile` needs no BuildKit:
+
+```bash
+docker build -t aprsr .
+docker compose up -d
+```
+
+[`docs/deploy.md`](docs/deploy.md) covers that, plus systemd, launchd and Windows.
+
 ### Migrating from aprsc
 
 ```bash
@@ -58,15 +71,23 @@ reported on stderr rather than dropped silently.
 |---|---|
 | **Framing** | TNC2 with the 512-byte limit enforced at the codec, before allocation |
 | **Login** | The full handshake, passcode verification, receive-only (`pass -1`) connections |
-| **q constructs** | `qAC qAX qAU qAo qAO qAS qAr qAR qAZ qAI`, the client-to-server algorithm, and the reject rules for loops and internal traffic |
-| **Filters** | `r/ p/ b/ o/ t/ s/ d/ a/ e/ g/ u/ q/ m/ f/` — additive, negatable with `-`, bounded against hostile input |
-| **Duplicates** | A rolling 30-second window keyed on the transmission, not the path |
-| **Ports** | `fullfeed`, `igate` with per-client filters, per-port forced filters and client caps |
+| **q constructs** | `qAC qAX qAU qAo qAO qAS qAr qAR qAZ qAI`, both halves of the algorithm, and the reject rules for loops and internal traffic |
+| **Filters** | `r/ p/ b/ o/ os/ t/ s/ d/ a/ e/ g/ u/ q/ m/ f/` — additive, negatable with `-`, bounded against hostile input |
+| **Duplicates** | A rolling 30-second window over the fields the specification names, path ignored |
+| **Ports** | `fullfeed`, `igate`, `udpsubmit` and `dupefeed`, with per-client filters, per-port forced filters and client caps |
+| **Uplinks** | Outbound links to other servers, `full` or `readonly`, with DNS rotation, backoff, and a failover list that keeps exactly one connected |
+| **UDP** | `udpsubmit` ingest, and feed delivery to clients that ask for it with `UDP <port>` |
+| **Access control** | CIDR allow/deny lists, a callsign blocklist, and a per-client rate limit |
+| **TLS** | Listening ports and outbound uplinks, over rustls, with the upstream certificate always verified |
+| **Messaging** | Messages reach the client that gated their addressee whatever its filter says, and the sender's next position follows |
 | **Persistence** | SQLite via SeaORM: station positions, connection log, sampled counters |
-| **Web** | Server-rendered dashboard, HTMX-live, plus `status.json` and `/healthz` |
+| **Web** | Live dashboard with a station map, history charts and a searchable client table, plus `status.json`, `/metrics` and `/healthz` |
+| **Deployment** | Runs on Linux, macOS and Windows; a container image builds from the repo, and `docs/deploy.md` covers systemd, launchd and Windows services |
 
-Not yet: uplinks and peer links, TLS, UDP, SCTP, ACL enforcement, and byte-transparent
-handling of non-UTF-8 payloads. All of it is in [`docs/roadmap.md`](docs/roadmap.md).
+Not yet: byte-transparent handling of non-UTF-8 payloads — see
+[`docs/roadmap.md`](docs/roadmap.md). Peer groups and SCTP are **not planned**, and the
+reasoning is written down in [`docs/peer-groups.md`](docs/peer-groups.md) and
+[`docs/sctp.md`](docs/sctp.md).
 
 ## Layout
 

@@ -1,7 +1,7 @@
 <section
   id="summary"
   hx-get="/fragments/summary"
-  hx-trigger="every 5s"
+  hx-trigger="aprsr:status from:body, every 30s"
   hx-swap="outerHTML"
 >
   <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
@@ -46,6 +46,13 @@
     <div class="rounded-lg border border-slate-800/70 bg-slate-900/30 px-4 py-3">
       <p class="text-xs uppercase tracking-wide text-slate-500">Stations tracked</p>
       <p class="mt-1 font-mono text-lg text-slate-300">{{ summary.stations_tracked }}</p>
+    </div>
+    <div
+      class="rounded-lg border border-slate-800/70 bg-slate-900/30 px-4 py-3"
+      title="Stations a client has gated recently, so messages addressed to them are routed back to that client"
+    >
+      <p class="text-xs uppercase tracking-wide text-slate-500">Stations gated</p>
+      <p class="mt-1 font-mono text-lg text-slate-300">{{ summary.stations_gated }}</p>
     </div>
   </div>
 

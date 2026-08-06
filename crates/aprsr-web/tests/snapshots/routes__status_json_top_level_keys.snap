@@ -3,9 +3,12 @@ source: crates/aprsr-web/tests/routes.rs
 expression: top
 ---
 [
+    "alarms",
     "clients",
     "listeners",
     "server",
+    "stations_gated",
     "stations_tracked",
     "totals",
+    "uplinks",
 ]
