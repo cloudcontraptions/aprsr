@@ -8,6 +8,13 @@
 @source "../../../crates/aprsr-web/templates/**/*.html";
 @source "../ts/**/*.ts";
 
+/* Test files are excluded because the scanner extracts anything that *looks* like a utility
+   from any text it is given, comments and identifiers included. A test whose prose happens
+   to contain the word "table" or "visible" would otherwise add dead rules to the shipped
+   stylesheet — and, worse, change the committed build, which CI byte-compares. Tests never
+   contribute a class the browser will use, so nothing is lost. */
+@source not "../ts/**/*.test.ts";
+
 /*
  * The live indicator reflects HTMX request state: solid when idle, dimmed while a poll is
  * in flight, amber when a poll failed. Driven by `src/ts/live.ts`.

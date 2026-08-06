@@ -65,7 +65,8 @@ pub fn configure(state: Arc<ServerState>) -> impl Fn(&mut web::ServiceConfig) + 
             .service(routes::events_packets)
             .service(routes::metrics)
             .service(routes::api_history)
-            .service(routes::config_json);
+            .service(routes::config_json)
+            .service(routes::api_stations);
     }
 }
 

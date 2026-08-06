@@ -634,3 +634,89 @@ async fn configured_but_unconnected_uplinks_raise_an_alarm() {
         "the message says why, not just that something is wrong"
     );
 }
+
+// --- stations -----------------------------------------------------------------------------
+
+/// Put a station on the map.
+fn add_station(state: &ServerState, callsign: &str, lat: f64, lon: f64, heard_at: i64) {
+    state.positions.record(
+        callsign,
+        aprsr_core::aprs::Position {
+            latitude: lat,
+            longitude: lon,
+        },
+        None,
+        heard_at,
+    );
+}
+
+#[actix_web::test]
+async fn stations_are_returned_for_the_map() {
+    let state = state();
+    add_station(&state, "OH7LZB", 60.17, 24.94, 1_000);
+    add_station(&state, "N0CALL", 32.78, -96.80, 2_000);
+
+    let body = body_of(state, "/api/stations").await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("stations");
+    assert_eq!(json["matched"], 2);
+    assert_eq!(json["returned"], 2);
+    // Most recently heard first, so a truncated response keeps what matters.
+    assert_eq!(json["stations"][0]["callsign"], "N0CALL");
+}
+
+/// Zooming in has to actually narrow the set, or the map returns a different arbitrary
+/// slice of the same data every time it moves.
+#[actix_web::test]
+async fn a_bounding_box_narrows_the_set() {
+    let state = state();
+    add_station(&state, "OH7LZB", 60.17, 24.94, 1_000); // Helsinki
+    add_station(&state, "N0CALL", 32.78, -96.80, 2_000); // Dallas
+
+    let body = body_of(state, "/api/stations?bbox=59,24,61,26").await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("stations");
+    assert_eq!(json["matched"], 1);
+    assert_eq!(json["stations"][0]["callsign"], "OH7LZB");
+}
+
+/// Panning across the Pacific produces a box whose west edge is greater than its east one.
+/// Without handling that, the map silently goes empty there.
+#[actix_web::test]
+async fn a_bounding_box_across_the_antimeridian_works() {
+    let state = state();
+    add_station(&state, "KH6AAA", 21.3, -157.8, 1_000); // Hawaii, west of the line
+    add_station(&state, "ZL1AAA", -36.8, 174.7, 2_000); // Auckland, east of it
+    add_station(&state, "OH7LZB", 60.17, 24.94, 3_000); // Finland, nowhere near
+
+    let body = body_of(state, "/api/stations?bbox=-90,150,90,-150").await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("stations");
+    assert_eq!(json["matched"], 2, "both Pacific stations, not the Finn");
+}
+
+/// A malformed box means "show the world" rather than an error: a map that briefly shows
+/// too much is a better failure than one that shows an error page.
+#[actix_web::test]
+async fn a_malformed_bounding_box_is_ignored() {
+    let state = state();
+    add_station(&state, "OH7LZB", 60.17, 24.94, 1_000);
+
+    for bbox in ["nonsense", "1,2,3", "1,2,3,4,5", "a,b,c,d", ""] {
+        let body = body_of(Arc::clone(&state), &format!("/api/stations?bbox={bbox}")).await;
+        let json: serde_json::Value = serde_json::from_str(&body).expect("stations");
+        assert_eq!(json["matched"], 1, "bbox {bbox:?} should be ignored");
+    }
+}
+
+/// A browser asked to draw forty thousand markers stops responding, so the response is
+/// capped — and says so, rather than implying it returned everything.
+#[actix_web::test]
+async fn the_station_count_is_capped_and_the_total_reported() {
+    let state = state();
+    for i in 0..50 {
+        add_station(&state, &format!("N0CAL-{i}"), 40.0, -100.0, i64::from(i));
+    }
+
+    let body = body_of(state, "/api/stations?limit=10").await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("stations");
+    assert_eq!(json["returned"], 10);
+    assert_eq!(json["matched"], 50, "the client can say 10 of 50");
+}

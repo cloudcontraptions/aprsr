@@ -496,3 +496,127 @@ pub async fn config_json(state: web::Data<ServerState>) -> impl Responder {
         packet_stream: config.http.packet_stream,
     })
 }
+
+// --- stations -----------------------------------------------------------------------------
+
+/// Most stations returned in one response.
+///
+/// A busy server tracks tens of thousands, and a browser asked to draw all of them will
+/// stop responding. The cap is applied after the bounding box, so zooming in genuinely
+/// narrows the set rather than returning a different arbitrary slice of the same one.
+const MAX_STATIONS: usize = 2_000;
+
+/// Query for [`api_stations`].
+#[derive(Debug, serde::Deserialize)]
+pub struct StationQuery {
+    /// `south,west,north,east` in degrees. Omitted means the whole world.
+    bbox: Option<String>,
+    /// Cap on returned stations, clamped to [`MAX_STATIONS`].
+    limit: Option<usize>,
+}
+
+/// A station with a known position.
+#[derive(Debug, serde::Serialize)]
+struct StationInfo {
+    callsign: String,
+    lat: f64,
+    lon: f64,
+    /// Symbol table identifier and code, as two separate characters — the pair is what
+    /// selects an APRS symbol, and splitting them here saves the client parsing.
+    symbol_table: Option<char>,
+    symbol_code: Option<char>,
+    /// Unix seconds when this position was last heard.
+    heard_at: i64,
+}
+
+/// A geographic bounding box.
+#[derive(Debug, Clone, Copy)]
+struct BoundingBox {
+    south: f64,
+    west: f64,
+    north: f64,
+    east: f64,
+}
+
+impl BoundingBox {
+    /// Parse `south,west,north,east`.
+    ///
+    /// Returns `None` for anything malformed, which the caller treats as "no box" rather
+    /// than as an error: a map that briefly shows the whole world is a better failure than
+    /// one that shows an error page.
+    fn parse(raw: &str) -> Option<Self> {
+        let mut parts = raw.split(',').map(str::trim).map(str::parse::<f64>);
+        let south = parts.next()?.ok()?;
+        let west = parts.next()?.ok()?;
+        let north = parts.next()?.ok()?;
+        let east = parts.next()?.ok()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        (south.is_finite() && west.is_finite() && north.is_finite() && east.is_finite()).then_some(
+            Self {
+                south,
+                west,
+                north,
+                east,
+            },
+        )
+    }
+
+    /// Whether a position falls inside.
+    ///
+    /// Handles a box that crosses the antimeridian, where `west` is greater than `east`.
+    /// Without this, panning a map across the Pacific silently returns nothing.
+    fn contains(&self, lat: f64, lon: f64) -> bool {
+        let within_latitude = lat >= self.south && lat <= self.north;
+        let within_longitude = if self.west <= self.east {
+            lon >= self.west && lon <= self.east
+        } else {
+            lon >= self.west || lon <= self.east
+        };
+        within_latitude && within_longitude
+    }
+}
+
+/// `GET /api/stations?bbox=south,west,north,east&limit=500` — stations to plot.
+#[get("/api/stations")]
+pub async fn api_stations(
+    state: web::Data<ServerState>,
+    query: web::Query<StationQuery>,
+) -> impl Responder {
+    let bbox = query.bbox.as_deref().and_then(BoundingBox::parse);
+    let limit = query.limit.unwrap_or(MAX_STATIONS).min(MAX_STATIONS);
+
+    let mut stations: Vec<StationInfo> = state
+        .positions
+        .snapshot()
+        .into_iter()
+        .filter(|entry| {
+            bbox.is_none_or(|b| b.contains(entry.position.latitude, entry.position.longitude))
+        })
+        .map(|entry| StationInfo {
+            callsign: entry.callsign.to_string(),
+            lat: entry.position.latitude,
+            lon: entry.position.longitude,
+            symbol_table: entry.symbol.map(|s| s.table),
+            symbol_code: entry.symbol.map(|s| s.code),
+            heard_at: entry.heard_at,
+        })
+        .collect();
+
+    // Most recently heard first, so a truncated response keeps the stations an operator is
+    // most likely to care about rather than whichever the hash map happened to yield.
+    stations.sort_unstable_by(|a, b| b.heard_at.cmp(&a.heard_at));
+    let total = stations.len();
+    stations.truncate(limit);
+
+    HttpResponse::Ok()
+        .insert_header(("cache-control", "no-store"))
+        .json(serde_json::json!({
+            "stations": stations,
+            // So the client can say "showing 2000 of 40000" rather than implying it has
+            // everything.
+            "returned": stations.len(),
+            "matched": total,
+        }))
+}
