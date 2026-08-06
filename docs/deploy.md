@@ -186,6 +186,32 @@ underneath them.
 TOML string is an escape, so `run_dir = "C:\ProgramData\aprsr"` is not the path it looks
 like. Write `run_dir = 'C:\ProgramData\aprsr'`.
 
+### Smart App Control blocks unsigned binaries
+
+Windows 11's Smart App Control refuses to run executables it cannot trace to a trusted
+signature. A binary you built yourself has none, so it will block:
+
+- **`aprsr.exe` as you built it**, if you compiled from source rather than downloading a
+  signed release.
+- **the Rust build itself.** A proc-macro crate compiles to a DLL that `rustc` loads while
+  compiling, and those are freshly built and unsigned. Blocked, the build fails with an
+  error that names the crate and not the cause:
+
+  ```
+  error[E0463]: can't find crate for `tokio_macros`
+  ```
+
+  Crate downloads can be blocked the same way, which produces the same shape of error a
+  little later.
+
+Smart App Control cannot be turned back on once disabled without reinstalling Windows, so
+it is worth being deliberate: build on a machine where it is off, or run a signed build.
+Windows Defender is a separate mechanism with the same symptom — if a build fails this way
+and Smart App Control is already off, exclude the repository's `target\` directory and
+`%USERPROFILE%\.cargo` from real-time scanning.
+
+This affects building and first-run only. Nothing about aprsr's operation depends on it.
+
 [NSSM]: https://nssm.cc/
 
 ---

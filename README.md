@@ -20,6 +20,10 @@ its filters ask for.
 You need a Rust toolchain (1.94 or newer). Nothing else — the dashboard assets are
 committed, so there is no Node build to run first.
 
+> **Windows 11:** Smart App Control blocks unsigned binaries, which includes the
+> proc-macro DLLs `rustc` loads while compiling. The build fails naming a crate rather than
+> the cause — see [`docs/deploy.md`](docs/deploy.md#smart-app-control-blocks-unsigned-binaries).
+
 ```bash
 git clone https://github.com/cloudcontraptions/aprsr
 cd aprsr
