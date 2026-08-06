@@ -355,6 +355,34 @@ async fn comment_lines_before_the_login_are_ignored() {
     server.stop().await;
 }
 
+/// A connection that connects and then says nothing must not delay shutdown.
+///
+/// The login read has its own thirty-second timeout, and a connection task holds a
+/// `Dispatcher` clone that the dispatch task waits on before the server can finish stopping.
+/// Without the login read observing shutdown, one silent connection — a health-check probe, a
+/// port scanner, a client whose network vanished between `connect` and `write` — would hold
+/// the whole server open for those thirty seconds. A service manager reading that as a hung
+/// process and sending `SIGKILL` is how a clean stop becomes an unclean one.
+#[tokio::test]
+async fn a_connection_that_never_logs_in_does_not_delay_shutdown() {
+    let server = TestServer::start().await;
+
+    // Connect, read the banner, and deliberately never send a login line.
+    let mut silent = TestClient::connect(server.addr("Clients")).await;
+    assert!(silent.line().await.starts_with('#'));
+
+    let started = tokio::time::Instant::now();
+    server.stop().await;
+    let elapsed = started.elapsed();
+
+    // Generously bounded: the point is "not the login timeout", not a latency budget. A
+    // regression here shows up as several seconds, not as milliseconds.
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "shutdown waited {elapsed:?} for a client that never logged in"
+    );
+}
+
 // --- packet flow ---------------------------------------------------------------------
 
 /// The central case: one client submits, another receives, and the server has recorded

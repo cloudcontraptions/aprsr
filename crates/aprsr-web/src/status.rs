@@ -116,6 +116,12 @@ pub struct ListenerInfo {
     pub max_clients: Option<usize>,
     /// The filter forced on every client of this port, if any.
     pub filter: Option<String>,
+    /// Whether connections to this port are wrapped in TLS.
+    ///
+    /// Published rather than left implicit in the port number, because "which of these is
+    /// the encrypted one" is the question a client operator arrives at this page with, and a
+    /// convention like "the one ten thousand higher" is not an answer.
+    pub tls: bool,
 }
 
 /// One configured uplink and what it is doing.
@@ -135,6 +141,8 @@ pub struct UplinkInfo {
     /// with, which a hostname alone does not tell them.
     pub peer_id: Option<String>,
     pub peer_software: Option<String>,
+    /// Whether this link dials out over TLS.
+    pub tls: bool,
     /// The address actually connected to, which differs per attempt on a DNS rotation.
     pub peer_addr: Option<String>,
     /// Unix seconds the current session started.
@@ -191,6 +199,7 @@ impl Status {
                 clients: state.registry.count_on_listener(&listener.name),
                 max_clients: listener.max_clients,
                 filter: listener.filter.clone(),
+                tls: listener.is_tls(),
             })
             .collect();
 
@@ -250,6 +259,7 @@ fn uplink_info(uplink: &Arc<aprsr_server::uplink::UplinkStatus>, now: u64) -> Up
         connected: uplink.is_connected(),
         peer_id: uplink.peer_id(),
         peer_software: uplink.peer_software(),
+        tls: uplink.is_tls(),
         peer_addr: uplink.peer_addr().map(|addr| addr.to_string()),
         connected_at,
         connected_secs: connected_at.map(|at| now.saturating_sub(at)),
@@ -309,7 +319,7 @@ hidden = true
 
     fn state() -> Arc<ServerState> {
         let config = Config::from_toml(CONFIG).expect("valid test configuration");
-        Arc::new(ServerState::new(Arc::new(config), None))
+        Arc::new(ServerState::new(Arc::new(config), None).expect("valid test state"))
     }
 
     fn add_client(state: &ServerState, callsign: &str, filter: &str) -> mpsc::Receiver<Arc<str>> {
@@ -423,7 +433,7 @@ address = "rotate.aprs.net:10152"
 
     fn state_with_uplink() -> Arc<ServerState> {
         let config = Config::from_toml(WITH_UPLINK).expect("valid test configuration");
-        Arc::new(ServerState::new(Arc::new(config), None))
+        Arc::new(ServerState::new(Arc::new(config), None).expect("valid test state"))
     }
 
     #[test]

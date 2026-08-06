@@ -9,6 +9,41 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **TLS**, on listening ports and on outbound uplinks. APRS-IS carries public data, so this
+  is not about the packets — it is about the login line, which carries a passcode, and about
+  a client on a hostile network being able to tell that the server it reached is the one it
+  meant to.
+
+  rustls rather than OpenSSL, for two reasons specific to this project: it is the same TLS
+  stack sea-orm already links, so the tree gains one implementation rather than two, and it
+  builds identically on Linux, macOS and Windows with no system library to find — which is
+  the difference between a cross-platform claim and a cross-platform claim with an asterisk.
+
+  A TLS port is a separate `[[listen]]` with a `tls` block, because it has to be: TLS and
+  plaintext cannot share a listener, and every APRS-IS client in existence expects the
+  well-known ports to be plaintext. Certificates are read, parsed and checked against their
+  key when the server *binds*, so a missing file or a mismatched pair stops startup with the
+  path in the message rather than failing the first connection at three in the morning. The
+  whole chain is sent, not just the leaf — a server that sends only its leaf works against a
+  client that already has the intermediate cached and fails everywhere else.
+
+  An uplink with a `tls` block verifies the upstream certificate against the Mozilla root
+  store compiled into the binary, or against a private authority named by `ca_file` —
+  *instead of* the public roots, not in addition, because a closed network that meant to
+  trust one authority should not silently keep trusting a hundred. **There is deliberately
+  no option to skip verification.** A `qAS` construct naming a server aprsr did not actually
+  authenticate is not a local mistake; it is wrong information injected into the whole
+  network, where nobody can tell which server produced it, and "just this once" is how that
+  ships.
+
+  `client::serve` and the uplink session are now generic over the transport, so a TLS
+  connection and a plaintext one run the same code from the banner onward. A second
+  implementation of the APRS-IS handshake, reached only by whoever configured a TLS port, is
+  a second implementation nobody would notice diverging.
+
+  `check-config` marks which ports are TLS and which name each uplink verifies; the
+  dashboard and `status.json` do the same. "Which of these is the encrypted one" should be
+  answerable from the status page, not from a convention about port numbers.
 - **A container.** A multi-stage `Dockerfile` and a `compose.yaml`, using no BuildKit-only
   features so `podman build` reads the same file — deliberate, because rootless Podman is
   often the only runtime installed on the kind of host an APRS-IS server ends up on. Debian
@@ -219,6 +254,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A connection that never logs in no longer delays shutdown.** The login read had its own
+  thirty-second timeout but did not watch the shutdown signal, and a connection task holds a
+  dispatcher handle that the dispatch task waits on before the server can finish stopping. One
+  silent connection — a health-check probe, a port scanner, a client whose network vanished
+  between `connect` and `write` — held the whole server open for those thirty seconds. A
+  service manager reading that as a hung process and sending `SIGKILL` is how a clean stop
+  becomes an unclean one.
+
+  The same race now guards the TLS handshake on both sides and an uplink's connect, all of
+  which are bounded operations that a stopping server should abandon rather than finish.
+
+  Found by a TLS test that took ten seconds for no reason anybody had noticed.
 - **The dashboard's assets now work on any machine.** They were read from
   `CARGO_MANIFEST_DIR/static` at runtime — an absolute path baked in at compile time, which
   resolves exactly once: on the machine that built the binary, with the source tree still

@@ -262,6 +262,8 @@ fn parse_listen(
         filter: None,
         max_clients: None,
         hidden: false,
+        // aprsc has no TLS listener directive to convert from.
+        tls: None,
         // aprsc has no equivalent directive: it binds one socket per address family and
         // expects the operator to write two `Listen` lines. Leaving this unset means
         // aprsr's default — an IPv6 bind also accepts IPv4 — which is what the pair of
@@ -345,6 +347,9 @@ fn parse_uplink(line: usize, args: &[String]) -> Result<Uplink, ConvertError> {
     })?;
 
     Ok(Uplink {
+        // aprsc's Uplink directive carries no TLS option, so a converted uplink is
+        // plaintext — which is what it was.
+        tls: None,
         name: args.first().cloned().unwrap_or_default(),
         kind,
         address: format!("{host}:{port}"),

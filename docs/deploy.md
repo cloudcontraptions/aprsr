@@ -214,6 +214,81 @@ nothing at all, so a typo cannot leave a server half-configured.
 `APRSR_SECTION__KEY` override, so `APRSR_HTTP__ADMIN_TOKEN` sets it without it ever being
 written down.
 
+## TLS
+
+A TLS port is a separate `[[listen]]`, because it has to be: TLS and plaintext cannot share
+one, and every APRS-IS client expects the well-known ports to be plaintext. Keep 14580 and
+10152 as they are and add a port beside them.
+
+```toml
+[[listen]]
+name = "Secure client port"
+kind = "igate"
+bind = "[::]:24580"
+tls = { cert = "/etc/letsencrypt/live/aprs.example.net/fullchain.pem", key = "/etc/letsencrypt/live/aprs.example.net/privkey.pem" }
+```
+
+`cert` is the **full chain** — leaf first, then the intermediates that chain it to a root.
+A file containing only the leaf works against a client that already has the intermediate
+cached and fails everywhere else, which is the single most common TLS deployment mistake.
+With Let's Encrypt that means `fullchain.pem`, not `cert.pem`. The key may be PKCS#8, PKCS#1
+or SEC1.
+
+Both files are read when the server binds, so `aprsr check-config` will not catch a bad path
+but the very next `aprsr run` will, immediately, with the filename in the message.
+`check-config` does mark which ports are TLS, which is worth checking against what you meant.
+
+**Certificate renewal needs a restart.** Certificates are loaded once at bind time and held
+for the life of the process, so a certbot renewal hook should reload or restart the service:
+
+```ini
+# /etc/letsencrypt/renewal-hooks/deploy/aprsr.sh
+#!/bin/sh
+systemctl restart aprsr
+```
+
+`SIGHUP` is not enough — it re-reads the configuration, and the certificate paths in it have
+not changed.
+
+**File permissions.** The private key must be readable by the user aprsr runs as. With the
+systemd unit above that is `DynamicUser=`, so either grant the certificate directory to the
+right group or run as a fixed user. Never make the key world-readable to work around it.
+
+### Uplinks over TLS
+
+```toml
+[[uplink]]
+name = "Secure core"
+kind = "readonly"
+address = "t2finland.aprs2.net:24152"
+tls = {}
+```
+
+An empty `tls = {}` is the switch — its presence turns TLS on. The upstream certificate is
+verified against the Mozilla root store compiled into the binary, which is the same on all
+three platforms; the operating system's own store is deliberately not used, because that is
+three different mechanisms and would make an uplink's trust decisions depend on which host it
+ran on.
+
+On a closed network with a private certificate authority:
+
+```toml
+tls = { ca_file = "/etc/aprsr/site-ca.pem", server_name = "aprs.site-b.internal" }
+```
+
+`ca_file` **replaces** the built-in roots rather than adding to them. `server_name` is the
+name the certificate is checked against, needed when connecting by IP address or through a
+tunnel; left unset it is the host part of `address`. A bare IPv6 literal always needs it.
+
+There is no option to skip verification, and there will not be one. A `qAS` construct naming
+a server aprsr did not actually authenticate is not a local mistake — it is wrong information
+injected into the whole network, where nobody can tell which server produced it.
+
+A failed verification is reported in the uplink's `last_error` on the dashboard and in
+`status.json`, naming both the address and the name that could not be verified — those two
+strings side by side are usually the whole diagnosis, because the common cause is a
+certificate issued for one member of a DNS rotation rather than for the rotation.
+
 ## Joining the network
 
 A server with no `[[uplink]]` relays between its own clients and exchanges nothing with

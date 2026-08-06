@@ -38,16 +38,18 @@ use aprsr_core::filter::FilterChain;
 use aprsr_core::login::{LoginLine, PeerIdentity};
 use aprsr_core::packet::MAX_PACKET_LEN;
 use futures_util::StreamExt;
-use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio_rustls::TlsConnector;
+use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_util::codec::FramedRead;
 
 use crate::codec::{Line, LineCodec};
 use crate::dispatch::{Dispatcher, Ingest, IngestSource};
 use crate::metrics::Metrics;
 use crate::registry::{ConnectionKind, Registration};
-use crate::{ServerState, Shutdown, now_secs};
+use crate::{ServerError, ServerState, Shutdown, now_secs};
 
 /// How long to wait for the far end to complete the handshake.
 ///
@@ -77,6 +79,86 @@ const BACKOFF_MAX: Duration = Duration::from_secs(60);
 /// a firewall closing the connection after the handshake — would reset the backoff on every
 /// attempt and reconnect every five seconds forever.
 const HEALTHY_SESSION: Duration = Duration::from_secs(60);
+
+/// How long the TLS handshake with an upstream server may take.
+///
+/// Shorter than [`HANDSHAKE_TIMEOUT`], which covers the APRS-IS login that follows it: the
+/// TLS exchange is two round trips and some arithmetic, so ten seconds is already generous,
+/// and an uplink stuck in it is a supervisor that never gets to try the next address in the
+/// rotation.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Everything an uplink needs to dial out over TLS, resolved once at startup.
+///
+/// Built when the server binds rather than when the link dials, so a CA bundle that cannot be
+/// read, or a `server_name` that is not a valid DNS name, stops the server with the path in
+/// the message. The alternative is an uplink that fails every sixty seconds forever for a
+/// reason only the debug log knows about.
+#[derive(Clone)]
+pub struct TlsSettings {
+    connector: TlsConnector,
+    /// The name the upstream certificate is checked against.
+    server_name: ServerName<'static>,
+}
+
+impl std::fmt::Debug for TlsSettings {
+    /// Written out because `TlsConnector` has no `Debug`, and printing the root store behind
+    /// it would be pages of DER for no benefit. What an operator wants to see is the name
+    /// being verified.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsSettings")
+            .field("server_name", &self.server_name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TlsSettings {
+    /// Build the TLS settings for one uplink, or `None` when it is plaintext.
+    ///
+    /// Failing here fails the server's startup. That is deliberate: an operator who wrote a
+    /// `[uplink.tls]` block asked for an authenticated link, and falling back to plaintext —
+    /// or to no link at all, quietly — would give them something they did not ask for on a
+    /// connection that carries this server's passcode.
+    pub fn from_config(config: &UplinkConfig) -> Result<Option<Self>, ServerError> {
+        let Some(tls) = config.tls.as_ref() else {
+            return Ok(None);
+        };
+
+        let connector = crate::tls::connector(tls.ca_file.as_deref()).map_err(|source| {
+            ServerError::UplinkTls {
+                uplink: config.name.clone(),
+                source: Box::new(source),
+            }
+        })?;
+
+        // `tls_server_name` returns `Some` whenever `config.tls` is set, so the fallback here
+        // is unreachable; taking the address verbatim is the honest reading if it ever is.
+        let name = config.tls_server_name().unwrap_or(&config.address);
+        let server_name =
+            ServerName::try_from(name.to_owned()).map_err(|_| ServerError::UplinkServerName {
+                uplink: config.name.clone(),
+                name: name.to_owned(),
+            })?;
+
+        Ok(Some(Self {
+            connector,
+            server_name,
+        }))
+    }
+
+    /// The name the upstream certificate is verified against, for logs and the status page.
+    #[must_use]
+    pub fn server_name(&self) -> String {
+        // `ServerName` renders as a debug-ish form; the string it was built from is what an
+        // operator recognises, and it round-trips through this reference.
+        match &self.server_name {
+            ServerName::DnsName(name) => name.as_ref().to_owned(),
+            ServerName::IpAddress(address) => std::net::IpAddr::from(*address).to_string(),
+            // `ServerName` is `#[non_exhaustive]`; a future variant still has a `Debug`.
+            other => format!("{other:?}"),
+        }
+    }
+}
 
 /// What an uplink is doing right now, for the status page.
 ///
@@ -119,6 +201,8 @@ pub struct UplinkStatus {
     pub kind: UplinkKind,
     /// The configured `host:port`, before resolution.
     pub address: Arc<str>,
+    /// Set when this uplink dials out over TLS.
+    pub tls: Option<TlsSettings>,
     state: AtomicU8,
     /// The identity the far end gave during the handshake, once it has.
     peer: std::sync::RwLock<Option<PeerIdentity>>,
@@ -135,12 +219,16 @@ pub struct UplinkStatus {
 }
 
 impl UplinkStatus {
-    #[must_use]
-    pub fn new(config: &UplinkConfig) -> Self {
-        Self {
+    /// Build the live state for one configured uplink.
+    ///
+    /// Fallible only because of TLS: a certificate authority that cannot be read, or a
+    /// server name that is not a name, is a configuration mistake and belongs at startup.
+    pub fn new(config: &UplinkConfig) -> Result<Self, ServerError> {
+        Ok(Self {
             name: Arc::from(config.name.as_str()),
             kind: config.kind,
             address: Arc::from(config.address.as_str()),
+            tls: TlsSettings::from_config(config)?,
             state: AtomicU8::new(UplinkState::Idle as u8),
             peer: std::sync::RwLock::new(None),
             peer_addr: std::sync::RwLock::new(None),
@@ -149,7 +237,13 @@ impl UplinkStatus {
             failures: AtomicU64::new(0),
             packets_received: AtomicU64::new(0),
             packets_sent: AtomicU64::new(0),
-        }
+        })
+    }
+
+    /// Whether this uplink dials out over TLS.
+    #[must_use]
+    pub const fn is_tls(&self) -> bool {
+        self.tls.is_some()
     }
 
     #[must_use]
@@ -261,14 +355,17 @@ pub struct UplinkRegistry {
 }
 
 impl UplinkRegistry {
-    #[must_use]
-    pub fn from_config(uplinks: &[UplinkConfig]) -> Self {
-        Self {
+    /// Build the registry from configuration.
+    ///
+    /// Fails if any uplink's TLS settings cannot be resolved, which stops the server. See
+    /// [`UplinkStatus::new`].
+    pub fn from_config(uplinks: &[UplinkConfig]) -> Result<Self, ServerError> {
+        Ok(Self {
             uplinks: uplinks
                 .iter()
-                .map(|config| Arc::new(UplinkStatus::new(config)))
-                .collect(),
-        }
+                .map(|config| UplinkStatus::new(config).map(Arc::new))
+                .collect::<Result<Vec<_>, _>>()?,
+        })
     }
 
     #[must_use]
@@ -470,16 +567,26 @@ pub async fn supervise(
 }
 
 /// Resolve, connect and run one session.
+///
+/// Everything before the session proper — resolution, the TCP connect, the TLS handshake — is
+/// raced against shutdown as well as against its own timeout. This task holds a [`Dispatcher`]
+/// clone, and the dispatch task ends only when the last one is dropped, so an uplink stuck
+/// dialling a black-holed address would otherwise hold the whole server's shutdown for the
+/// full connect timeout.
 async fn connect_once(
     status: &Arc<UplinkStatus>,
     state: &Arc<ServerState>,
     dispatcher: &Dispatcher,
-    shutdown: Shutdown,
+    mut shutdown: Shutdown,
     attempt: u64,
 ) -> SessionEnd {
     // Resolved per attempt, never cached. `rotate.aprs.net` is a DNS rotation whose answers
     // change, and a cached list would keep dialling a server that has been taken out of it.
-    let addresses = match tokio::net::lookup_host(status.address.as_ref()).await {
+    let resolved = tokio::select! {
+        resolved = tokio::net::lookup_host(status.address.as_ref()) => resolved,
+        () = shutdown.wait() => return SessionEnd::Shutdown,
+    };
+    let addresses = match resolved {
         Ok(iter) => iter.collect::<Vec<_>>(),
         Err(error) => return SessionEnd::Failed(format!("could not resolve: {error}")),
     };
@@ -488,7 +595,11 @@ async fn connect_once(
         return SessionEnd::Failed("the address resolved to nothing".to_owned());
     };
 
-    let socket = match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(address)).await {
+    let connected = tokio::select! {
+        connected = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(address)) => connected,
+        () = shutdown.wait() => return SessionEnd::Shutdown,
+    };
+    let socket = match connected {
         Ok(Ok(socket)) => socket,
         Ok(Err(error)) => {
             return SessionEnd::Failed(format!("could not connect to {address}: {error}"));
@@ -496,25 +607,73 @@ async fn connect_once(
         Err(_) => return SessionEnd::Failed(format!("connecting to {address} timed out")),
     };
 
-    tracing::info!(uplink = %status.name, %address, "connected to upstream server");
-    serve(socket, address, status, state, dispatcher, shutdown).await
+    // Same reasoning as an inbound connection: APRS packets are small and latency-sensitive.
+    // Set here rather than inside the session, because a TLS wrapper buries the socket.
+    if let Err(error) = socket.set_nodelay(true) {
+        tracing::debug!(uplink = %status.name, %error, "could not disable Nagle's algorithm");
+    }
+
+    let Some(settings) = status.tls.as_ref() else {
+        tracing::info!(uplink = %status.name, %address, "connected to upstream server");
+        return serve(socket, address, status, state, dispatcher, shutdown).await;
+    };
+
+    // Bounded on its own, before the login timeout that follows: an upstream that completes
+    // TCP and then stalls in the handshake would otherwise hold the supervisor for the whole
+    // login window and never let it try the next address in the rotation.
+    let handshake = tokio::select! {
+        handshake = tokio::time::timeout(
+            TLS_HANDSHAKE_TIMEOUT,
+            settings
+                .connector
+                .connect(settings.server_name.clone(), socket),
+        ) => handshake,
+        () = shutdown.wait() => return SessionEnd::Shutdown,
+    };
+
+    let stream = match handshake {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
+            // Worth naming the verified name as well as the address: the overwhelmingly
+            // common cause is a certificate for a rotation member rather than the rotation,
+            // and the two strings side by side say so immediately.
+            return SessionEnd::Failed(format!(
+                "the TLS handshake with {address} as {} failed: {error}",
+                settings.server_name()
+            ));
+        }
+        Err(_) => {
+            return SessionEnd::Failed(format!("the TLS handshake with {address} timed out"));
+        }
+    };
+
+    tracing::info!(
+        uplink = %status.name,
+        %address,
+        server_name = %settings.server_name(),
+        "connected to upstream server over TLS"
+    );
+    serve(stream, address, status, state, dispatcher, shutdown).await
 }
 
 /// Run one uplink session, from the login line to the socket closing.
-async fn serve(
-    socket: TcpStream,
+///
+/// Generic over the transport for the same reason [`crate::client::serve`] is: a plaintext
+/// `TcpStream` and a TLS stream wrapping one carry exactly the same protocol above the
+/// socket, and one implementation is what stops the TLS path quietly diverging from the
+/// plaintext one.
+async fn serve<S>(
+    stream: S,
     address: SocketAddr,
     status: &Arc<UplinkStatus>,
     state: &Arc<ServerState>,
     dispatcher: &Dispatcher,
     mut shutdown: Shutdown,
-) -> SessionEnd {
-    // Same reasoning as an inbound connection: APRS packets are small and latency-sensitive.
-    if let Err(error) = socket.set_nodelay(true) {
-        tracing::debug!(uplink = %status.name, %error, "could not disable Nagle's algorithm");
-    }
-
-    let (reader, writer) = socket.into_split();
+) -> SessionEnd
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let (reader, writer) = tokio::io::split(stream);
     let mut lines = FramedRead::new(reader, LineCodec::with_max_length(MAX_PACKET_LEN));
     let mut writer = BufWriter::new(writer);
 
@@ -623,10 +782,13 @@ struct Handshake {
 /// field is specified — so reading continues until it arrives or the connection stops
 /// producing comment lines. Packets that arrive before it is complete are not dropped
 /// silently: the loop stops at the first non-comment line and reports what it has.
-async fn read_handshake(
-    lines: &mut FramedRead<tokio::net::tcp::OwnedReadHalf, LineCodec>,
+async fn read_handshake<S>(
+    lines: &mut FramedRead<ReadHalf<S>, LineCodec>,
     status: &UplinkStatus,
-) -> Option<Handshake> {
+) -> Option<Handshake>
+where
+    S: AsyncRead + AsyncWrite,
+{
     let mut identity: Option<PeerIdentity> = None;
     let mut verified = false;
 
@@ -669,15 +831,18 @@ async fn read_handshake(
 }
 
 /// Read packets from the upstream server until the link ends.
-async fn read_feed(
-    lines: &mut FramedRead<tokio::net::tcp::OwnedReadHalf, LineCodec>,
+async fn read_feed<S>(
+    lines: &mut FramedRead<ReadHalf<S>, LineCodec>,
     status: &UplinkStatus,
     entry: &crate::registry::Client,
     peer_login: &Arc<str>,
     state: &ServerState,
     dispatcher: &Dispatcher,
     shutdown: &mut Shutdown,
-) -> SessionEnd {
+) -> SessionEnd
+where
+    S: AsyncRead + AsyncWrite,
+{
     let timeout = state.config().limits.upstream_timeout.as_duration();
 
     loop {
@@ -741,13 +906,15 @@ async fn read_feed(
 }
 
 /// Send this server's contribution upstream, with keepalives while it is idle.
-async fn write_feed(
-    mut writer: BufWriter<tokio::net::tcp::OwnedWriteHalf>,
+async fn write_feed<S>(
+    mut writer: BufWriter<WriteHalf<S>>,
     mut outbox: mpsc::Receiver<Arc<str>>,
     status: Arc<UplinkStatus>,
     entry: Arc<crate::registry::Client>,
     mut shutdown: Shutdown,
-) {
+) where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
     // A read-only uplink still runs this task, and still sends keepalives: the far end times
     // out a silent connection exactly as aprsr does.
     let mut keepalive = tokio::time::interval(Duration::from_secs(20));
@@ -797,19 +964,22 @@ async fn write_feed(
 }
 
 /// Write one line with the CR/LF terminator APRS-IS requires, and flush.
-async fn write_line(
-    writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
-    line: &str,
-) -> std::io::Result<()> {
+async fn write_line<S>(writer: &mut BufWriter<WriteHalf<S>>, line: &str) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite,
+{
     write_line_buffered(writer, line).await?;
     writer.flush().await
 }
 
 /// Write one line without flushing.
-async fn write_line_buffered(
-    writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
+async fn write_line_buffered<S>(
+    writer: &mut BufWriter<WriteHalf<S>>,
     line: &str,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite,
+{
     writer.write_all(line.as_bytes()).await?;
     writer.write_all(b"\r\n").await
 }
@@ -824,7 +994,23 @@ mod tests {
             name: name.to_owned(),
             kind,
             address: address.to_owned(),
+            tls: None,
         }
+    }
+
+    /// A plaintext uplink's status, which cannot fail to build.
+    fn status(name: &str, kind: UplinkKind, address: &str) -> UplinkStatus {
+        UplinkStatus::new(&config(name, kind, address)).expect("a plaintext uplink always builds")
+    }
+
+    fn registry(uplinks: &[UplinkConfig]) -> UplinkRegistry {
+        UplinkRegistry::from_config(uplinks).expect("plaintext uplinks always build")
+    }
+
+    fn test_data(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data")
+            .join(name)
     }
 
     #[rstest]
@@ -908,17 +1094,139 @@ mod tests {
 
     #[test]
     fn a_fresh_uplink_reports_itself_as_idle_and_unidentified() {
-        let status = UplinkStatus::new(&config("Core", UplinkKind::Full, "rotate.aprs.net:10152"));
+        let status = status("Core", UplinkKind::Full, "rotate.aprs.net:10152");
         assert_eq!(status.state(), UplinkState::Idle);
         assert!(!status.is_connected());
+        assert!(!status.is_tls());
         assert_eq!(status.peer_id(), None);
         assert_eq!(status.connected_at(), None);
         assert_eq!(status.last_error(), None);
     }
 
+    /// An uplink with a `tls` block dials out over TLS, verifying the host from `address`.
+    #[test]
+    fn a_tls_uplink_verifies_the_host_in_its_address() {
+        let uplink = UplinkConfig {
+            tls: Some(aprsr_config::UplinkTls::default()),
+            ..config("Core", UplinkKind::Full, "rotate.aprs.net:24152")
+        };
+
+        let status = UplinkStatus::new(&uplink).expect("the public roots are usable");
+        assert!(status.is_tls());
+        let settings = status.tls.as_ref().expect("TLS is configured");
+        assert_eq!(settings.server_name(), "rotate.aprs.net");
+    }
+
+    /// An explicit `server_name` wins, which is how an operator connects by IP address or
+    /// through a tunnel whose hostname differs from the certificate's.
+    #[test]
+    fn an_explicit_server_name_overrides_the_address() {
+        let uplink = UplinkConfig {
+            tls: Some(aprsr_config::UplinkTls {
+                ca_file: None,
+                server_name: Some("t2finland.aprs2.net".to_owned()),
+            }),
+            ..config("Core", UplinkKind::Full, "192.0.2.1:24152")
+        };
+
+        let settings = TlsSettings::from_config(&uplink)
+            .expect("the public roots are usable")
+            .expect("TLS is configured");
+        assert_eq!(settings.server_name(), "t2finland.aprs2.net");
+        // The `Debug` impl exists so a state dump is readable; check it says the one thing
+        // worth saying.
+        assert!(format!("{settings:?}").contains("t2finland.aprs2.net"));
+    }
+
+    /// A private certificate authority is loaded at startup, so a path typo stops the server
+    /// rather than becoming a reconnect loop nobody can diagnose.
+    #[test]
+    fn a_private_authority_is_loaded_at_startup() {
+        let uplink = UplinkConfig {
+            tls: Some(aprsr_config::UplinkTls {
+                ca_file: Some(test_data("test-ca.pem")),
+                server_name: None,
+            }),
+            ..config("Private", UplinkKind::Full, "aprsr-test:24152")
+        };
+
+        let settings = TlsSettings::from_config(&uplink)
+            .expect("the committed test certificate is a usable authority")
+            .expect("TLS is configured");
+        assert_eq!(settings.server_name(), "aprsr-test");
+    }
+
+    #[test]
+    fn a_missing_certificate_authority_is_reported_with_the_uplink_that_wanted_it() {
+        let uplink = UplinkConfig {
+            tls: Some(aprsr_config::UplinkTls {
+                ca_file: Some(std::path::PathBuf::from("/nonexistent/aprsr/ca.pem")),
+                server_name: None,
+            }),
+            ..config("Private", UplinkKind::Full, "upstream.example.net:24152")
+        };
+
+        let error = TlsSettings::from_config(&uplink).unwrap_err();
+        assert!(
+            matches!(&error, ServerError::UplinkTls { uplink, .. } if uplink == "Private"),
+            "got {error:?}"
+        );
+        assert!(error.to_string().contains("/nonexistent/aprsr/ca.pem"));
+    }
+
+    /// Connecting to a bare IP address with no `server_name` cannot be verified against a
+    /// hostname, so it has to fail at startup with advice rather than at connect time.
+    #[test]
+    fn a_server_name_that_is_not_a_name_is_refused_at_startup() {
+        let uplink = UplinkConfig {
+            tls: Some(aprsr_config::UplinkTls {
+                ca_file: None,
+                server_name: Some("not a hostname".to_owned()),
+            }),
+            ..config("Core", UplinkKind::Full, "upstream.example.net:24152")
+        };
+
+        let error = TlsSettings::from_config(&uplink).unwrap_err();
+        assert!(
+            matches!(&error, ServerError::UplinkServerName { uplink, name }
+                if uplink == "Core" && name == "not a hostname"),
+            "got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("server_name"),
+            "the message should say how to fix it"
+        );
+    }
+
+    /// A bracketed IPv6 literal is not a DNS name and cannot be a certificate's subject
+    /// either, so it must be refused rather than silently verified against something else.
+    #[test]
+    fn a_bare_ipv6_address_needs_an_explicit_server_name() {
+        let uplink = UplinkConfig {
+            tls: Some(aprsr_config::UplinkTls::default()),
+            ..config("Core", UplinkKind::Full, "[2001:db8::1]:24152")
+        };
+
+        assert!(matches!(
+            TlsSettings::from_config(&uplink).unwrap_err(),
+            ServerError::UplinkServerName { .. }
+        ));
+    }
+
+    /// A plaintext uplink carries no TLS settings at all — the absence is the switch.
+    #[test]
+    fn an_uplink_without_a_tls_block_is_plaintext() {
+        let plain = config("Core", UplinkKind::Full, "rotate.aprs.net:10152");
+        assert!(
+            TlsSettings::from_config(&plain)
+                .expect("nothing to load")
+                .is_none()
+        );
+    }
+
     #[test]
     fn a_failure_is_recorded_with_its_reason() {
-        let status = UplinkStatus::new(&config("Core", UplinkKind::Full, "example.net:10152"));
+        let status = status("Core", UplinkKind::Full, "example.net:10152");
         assert_eq!(status.record_failure("could not resolve"), 1);
         assert_eq!(status.record_failure("could not resolve"), 2);
         assert_eq!(status.state(), UplinkState::Failed);
@@ -928,7 +1236,7 @@ mod tests {
 
     #[test]
     fn connecting_clears_the_previous_failure() {
-        let status = UplinkStatus::new(&config("Core", UplinkKind::Full, "example.net:10152"));
+        let status = status("Core", UplinkKind::Full, "example.net:10152");
         status.record_failure("refused");
         status.record_connected(
             PeerIdentity {
@@ -960,7 +1268,7 @@ mod tests {
 
     #[test]
     fn the_registry_keeps_configuration_order() {
-        let registry = UplinkRegistry::from_config(&[
+        let registry = registry(&[
             config("Second choice", UplinkKind::ReadOnly, "b.example.net:10152"),
             config("First choice", UplinkKind::Full, "a.example.net:10152"),
         ]);
@@ -974,14 +1282,14 @@ mod tests {
 
     #[test]
     fn a_server_with_no_uplinks_has_an_empty_registry() {
-        let registry = UplinkRegistry::from_config(&[]);
+        let registry = registry(&[]);
         assert!(registry.is_empty());
         assert_eq!(registry.connected(), 0);
     }
 
     #[test]
     fn connected_counts_only_established_links() {
-        let registry = UplinkRegistry::from_config(&[
+        let registry = registry(&[
             config("A", UplinkKind::Full, "a.example.net:10152"),
             config("B", UplinkKind::Full, "b.example.net:10152"),
         ]);

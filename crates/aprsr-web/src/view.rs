@@ -66,6 +66,8 @@ pub struct ListenerRow {
     pub bind: String,
     pub clients: String,
     pub filter: String,
+    /// Whether connections to this port are wrapped in TLS.
+    pub tls: bool,
 }
 
 impl ListenerRow {
@@ -78,6 +80,7 @@ impl ListenerRow {
                 name: listener.name.clone(),
                 kind: kind_label(listener.kind).to_owned(),
                 bind: listener.bind.clone(),
+                tls: listener.tls,
                 clients: match listener.max_clients {
                     Some(max) => format!("{} / {}", listener.clients, max),
                     None => format::count(listener.clients as u64),
@@ -103,6 +106,8 @@ pub struct UplinkRow {
     pub peer: String,
     /// The address actually connected to, which a DNS rotation makes worth showing.
     pub peer_addr: String,
+    /// Whether this link dials out over TLS.
+    pub tls: bool,
     pub uptime: String,
     pub packets_received: String,
     pub packets_sent: String,
@@ -126,6 +131,7 @@ impl UplinkRow {
                     UplinkKind::ReadOnly => "receive only",
                 },
                 address: uplink.address.clone(),
+                tls: uplink.tls,
                 state: match uplink.state {
                     UplinkState::Connected => "connected",
                     UplinkState::Connecting => "connecting",
@@ -308,6 +314,7 @@ mod tests {
                     clients: 40,
                     max_clients: Some(1_000),
                     filter: None,
+                    tls: false,
                 },
                 ListenerInfo {
                     name: "Full feed".to_owned(),
@@ -316,6 +323,7 @@ mod tests {
                     clients: 2,
                     max_clients: None,
                     filter: Some("m/350".to_owned()),
+                    tls: false,
                 },
             ],
             clients: vec![ClientInfo {
@@ -353,6 +361,7 @@ mod tests {
             connected,
             peer_id: connected.then(|| "T2FINLAND".to_owned()),
             peer_software: connected.then(|| "aprsc 2.1.11".to_owned()),
+            tls: false,
             peer_addr: connected.then(|| "192.0.2.1:10152".to_owned()),
             connected_at: connected.then_some(1_700_000_000),
             connected_secs: connected.then_some(5_400),

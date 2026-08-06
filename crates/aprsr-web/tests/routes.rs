@@ -38,7 +38,7 @@ hidden = true
 
 fn state() -> Arc<ServerState> {
     let config = Config::from_toml(CONFIG).expect("valid test configuration");
-    Arc::new(ServerState::new(Arc::new(config), None))
+    Arc::new(ServerState::new(Arc::new(config), None).expect("valid test state"))
 }
 
 /// Register a client and return the receiver, which must be held so the entry stays live.
@@ -329,7 +329,9 @@ fn state_from_file(config: &str) -> (Arc<ServerState>, tempfile::TempDir, std::p
     std::fs::write(&path, config).expect("writes the configuration");
 
     let loaded = Config::load(&path).expect("valid test configuration");
-    let state = ServerState::new(Arc::new(loaded), None).with_config_path(&path);
+    let state = ServerState::new(Arc::new(loaded), None)
+        .expect("valid test state")
+        .with_config_path(&path);
     (Arc::new(state), dir, path)
 }
 
@@ -475,7 +477,7 @@ async fn an_invalid_configuration_changes_nothing() {
 #[actix_web::test]
 async fn reloading_a_server_with_no_configuration_file_is_refused() {
     let config = Config::from_toml(WITH_TOKEN).expect("valid test configuration");
-    let state = Arc::new(ServerState::new(Arc::new(config), None));
+    let state = Arc::new(ServerState::new(Arc::new(config), None).expect("valid test state"));
 
     let response = post_reload(state, Some("s3cret-token")).await;
     assert_eq!(response.status(), StatusCode::CONFLICT);
@@ -541,7 +543,7 @@ async fn the_packet_stream_is_off_by_default() {
 async fn the_packet_stream_still_needs_the_token_when_enabled() {
     let config = format!("{CONFIG}\n[http]\nadmin_token = \"s3cret\"\npacket_stream = true\n");
     let loaded = Config::from_toml(&config).expect("valid test configuration");
-    let state = Arc::new(ServerState::new(Arc::new(loaded), None));
+    let state = Arc::new(ServerState::new(Arc::new(loaded), None).expect("valid test state"));
 
     let app = test::init_service(App::new().configure(aprsr_web::configure(state))).await;
     let request = test::TestRequest::get().uri("/events/packets").to_request();
@@ -574,7 +576,7 @@ async fn a_motd_file_is_rendered_as_html() {
         motd.to_string_lossy()
     );
     let loaded = Config::from_toml(&config).expect("valid test configuration");
-    let state = Arc::new(ServerState::new(Arc::new(loaded), None));
+    let state = Arc::new(ServerState::new(Arc::new(loaded), None).expect("valid test state"));
 
     let body = body_of(state, "/").await;
     assert!(
@@ -596,7 +598,7 @@ async fn an_empty_or_missing_motd_file_shows_nothing() {
         motd.to_string_lossy()
     );
     let loaded = Config::from_toml(&config).expect("valid test configuration");
-    let state = Arc::new(ServerState::new(Arc::new(loaded), None));
+    let state = Arc::new(ServerState::new(Arc::new(loaded), None).expect("valid test state"));
     assert!(!body_of(Arc::clone(&state), "/").await.contains("<aside"));
 
     // And a file that goes away takes the banner with it, without a restart.
@@ -627,7 +629,7 @@ fn state_with_uplinks(count: usize) -> Arc<ServerState> {
         );
     }
     let loaded = Config::from_toml(&config).expect("valid test configuration");
-    Arc::new(ServerState::new(Arc::new(loaded), None))
+    Arc::new(ServerState::new(Arc::new(loaded), None).expect("valid test state"))
 }
 
 /// An operator who configured an uplink expects to be exchanging traffic. A server whose

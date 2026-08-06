@@ -15,7 +15,10 @@ use tokio::net::TcpListener;
 use crate::ServerError;
 
 /// Everything a connection task needs to know about the port it arrived on.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is written out rather than derived: `TlsAcceptor` has none, and the useful thing
+/// to print about it is whether it is there at all rather than the certificate chain inside.
+#[derive(Clone)]
 pub struct ListenerContext {
     pub name: Arc<str>,
     pub kind: PortKind,
@@ -24,6 +27,23 @@ pub struct ListenerContext {
     pub forced_filter: Option<FilterChain>,
     pub max_clients: Option<usize>,
     pub hidden: bool,
+    /// Set when this port is TLS. Built once at bind time, so a certificate that cannot be
+    /// loaded stops the server rather than failing the first connection.
+    pub tls: Option<Arc<tokio_rustls::TlsAcceptor>>,
+}
+
+impl std::fmt::Debug for ListenerContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ListenerContext")
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("protocol", &self.protocol)
+            .field("forced_filter", &self.forced_filter)
+            .field("max_clients", &self.max_clients)
+            .field("hidden", &self.hidden)
+            .field("tls", &self.tls.is_some())
+            .finish()
+    }
 }
 
 impl ListenerContext {
@@ -39,6 +59,18 @@ impl ListenerContext {
             None => None,
         };
 
+        let tls = match &config.tls {
+            Some(settings) => Some(Arc::new(
+                crate::tls::acceptor(&settings.cert, &settings.key).map_err(|source| {
+                    ServerError::Tls {
+                        listener: config.name.clone(),
+                        source: Box::new(source),
+                    }
+                })?,
+            )),
+            None => None,
+        };
+
         Ok(Self {
             name: Arc::from(config.name.as_str()),
             kind: config.kind,
@@ -46,6 +78,7 @@ impl ListenerContext {
             forced_filter,
             max_clients: config.max_clients,
             hidden: config.hidden,
+            tls,
         })
     }
 }
@@ -365,6 +398,7 @@ bind = "{addr}"
             filter: Some("m/350".to_owned()),
             max_clients: None,
             hidden: false,
+            tls: None,
             bind: "127.0.0.1:0".parse().expect("valid address"),
             dual_stack: None,
         };
@@ -385,6 +419,7 @@ bind = "{addr}"
             filter: Some("nonsense/9".to_owned()),
             max_clients: None,
             hidden: false,
+            tls: None,
             bind: "127.0.0.1:0".parse().expect("valid address"),
             dual_stack: None,
         };

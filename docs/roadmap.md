@@ -28,6 +28,10 @@ Update this file in the same change that moves an item.
   feed delivery to a client whose login carried `UDP <port>`.
 - **Access control** — CIDR allow and deny lists with longest-prefix matching, a callsign
   blocklist, and a per-client token-bucket rate limit on submissions.
+- **TLS** — listening ports and outbound uplinks, over rustls. Certificates load when the
+  server binds, so a bad path or a mismatched pair is a startup failure naming the file.
+  An uplink verifies the upstream certificate against the built-in Mozilla roots or a
+  private authority, and there is no option to skip that.
 - **`dupefeed` ports** — the packets duplicate detection suppressed, delivered verbatim to
   the clients that asked for them.
 - **Dispatch** — single ingest task, bounded per-client queues, slow clients drop packets
@@ -62,7 +66,10 @@ invalid. APRS is historically byte-transparent, so a comment field with high byt
 currently dropped rather than relayed. Fixing this means moving the packet types off `&str`
 onto `&[u8]`, which touches every parser in `aprsr-core`.
 
-**TLS** — for client connections and uplinks.
+**Duplicate-normalisation variants** — aprsr detects an exact repeat and one differing only
+by trailing whitespace. aprsc detects several more, including payloads that differ only in
+whether the high bit of each byte survived a gateway. Those are genuinely different packets
+to aprsr today, and both get relayed.
 
 ## Later
 

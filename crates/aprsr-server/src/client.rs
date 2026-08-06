@@ -18,8 +18,7 @@ use aprsr_core::packet::MAX_PACKET_LEN;
 use aprsr_core::passcode::Verification;
 use aprsr_store::NewSession;
 use futures_util::StreamExt;
-use tokio::io::{AsyncWriteExt, BufWriter};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf};
 use tokio::sync::mpsc;
 use tokio_util::codec::FramedRead;
 
@@ -54,37 +53,26 @@ const FAREWELL_GRACE: Duration = Duration::from_secs(2);
 const CLIENT_ONLY_PORT: bool = false;
 
 /// Serve one accepted connection until it closes or the server shuts down.
-pub async fn serve(
-    socket: TcpStream,
+///
+/// Generic over the transport so a plaintext `TcpStream` and a `TlsStream` wrapping one go
+/// through exactly the same code. Everything about APRS-IS above the socket is identical on
+/// the two, and having one implementation is what stops the TLS port quietly diverging from
+/// the plaintext one.
+///
+/// The peer address is passed in rather than read from the stream: by the time a TLS
+/// handshake has completed the address is buried behind the wrapper, and the checks that
+/// depend on it — the access list above all — should have happened long before that. See
+/// `accept_loop`, which does them.
+pub async fn serve<S>(
+    stream: S,
+    peer: std::net::SocketAddr,
     listener: Arc<ListenerContext>,
     state: Arc<ServerState>,
     dispatcher: Dispatcher,
-    shutdown: Shutdown,
-) {
-    let peer = match socket.peer_addr() {
-        Ok(addr) => addr,
-        Err(error) => {
-            tracing::debug!(%error, "connection vanished before it could be served");
-            return;
-        }
-    };
-
-    // The address check comes first, before the socket option, before the banner, before
-    // anything is allocated for this connection. A blocked address should cost a `close()`
-    // and nothing else — this is the one place in the server where work done before a
-    // decision is work an attacker can ask for.
-    if !state.access.permits(peer.ip()) {
-        Metrics::incr(&state.metrics.connections_refused);
-        tracing::debug!(%peer, listener = %listener.name, "refusing a blocked address");
-        return;
-    }
-
-    // Disable Nagle: APRS packets are small and latency-sensitive, and coalescing them
-    // into larger segments only adds delay.
-    if let Err(error) = socket.set_nodelay(true) {
-        tracing::debug!(%error, %peer, "could not disable Nagle's algorithm");
-    }
-
+    mut shutdown: Shutdown,
+) where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
     if let Some(limit) = listener.max_clients
         && state.registry.count_on_listener(&listener.name) >= limit
     {
@@ -92,11 +80,13 @@ pub async fn serve(
         return;
     }
 
-    let (reader, writer) = socket.into_split();
+    let (reader, writer) = tokio::io::split(stream);
     let mut lines = FramedRead::new(reader, LineCodec::with_max_length(MAX_PACKET_LEN));
     let mut writer = BufWriter::new(writer);
 
-    let Some((login, verification)) = handshake(&mut lines, &mut writer, peer, &state).await else {
+    let Some((login, verification)) =
+        handshake(&mut lines, &mut writer, peer, &state, &mut shutdown).await
+    else {
         return;
     };
     let callsign: Arc<str> = Arc::from(login.callsign.as_str());
@@ -160,12 +150,16 @@ pub async fn serve(
 /// Per <http://www.aprs-is.net/Connecting.aspx>: banner, login line, acknowledgement. The
 /// callsign blocklist sits between the second and the third, because the login is the first
 /// moment the callsign is known.
-async fn handshake(
-    lines: &mut FramedRead<tokio::net::tcp::OwnedReadHalf, LineCodec>,
-    writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
+async fn handshake<S>(
+    lines: &mut FramedRead<ReadHalf<S>, LineCodec>,
+    writer: &mut BufWriter<WriteHalf<S>>,
     peer: std::net::SocketAddr,
     state: &ServerState,
-) -> Option<(LoginRequest, Verification)> {
+    shutdown: &mut Shutdown,
+) -> Option<(LoginRequest, Verification)>
+where
+    S: AsyncRead + AsyncWrite,
+{
     // 1. The banner, before the client says anything.
     let banner = Banner {
         software: crate::SOFTWARE_NAME,
@@ -175,7 +169,7 @@ async fn handshake(
     write_line(writer, &banner.to_string()).await.ok()?;
 
     // 2. The login line.
-    let Some(login) = read_login(lines).await else {
+    let Some(login) = read_login(lines, shutdown).await else {
         Metrics::incr(&state.metrics.logins_rejected);
         return None;
     };
@@ -286,13 +280,22 @@ async fn register(
 }
 
 /// Read and parse the login line, within the login timeout.
-async fn read_login(
-    lines: &mut FramedRead<tokio::net::tcp::OwnedReadHalf, LineCodec>,
+///
+/// Raced against shutdown as well as the clock. This task holds a [`crate::dispatch::Dispatcher`]
+/// clone and the dispatch task ends only when the last one is dropped, so without the race a
+/// single connection that says nothing — a health-check probe, a port scanner, a client whose
+/// network vanished between `connect` and `write` — would hold the whole server's shutdown for
+/// the full login timeout.
+async fn read_login<S: AsyncRead>(
+    lines: &mut FramedRead<ReadHalf<S>, LineCodec>,
+    shutdown: &mut Shutdown,
 ) -> Option<LoginRequest> {
     loop {
-        let next = tokio::time::timeout(LOGIN_TIMEOUT, lines.next())
-            .await
-            .ok()??;
+        let next = tokio::select! {
+            next = tokio::time::timeout(LOGIN_TIMEOUT, lines.next()) => next,
+            () = shutdown.wait() => return None,
+        };
+        let next = next.ok()??;
         let line = match next {
             Ok(Line::Text(line)) => line,
             // An oversized or undecodable login is not a login; keep waiting for a real
@@ -396,8 +399,8 @@ fn udp_feed_for(
 ///
 /// When `udp_feed` is set the packets go out as datagrams and the TCP connection carries
 /// only the keepalives — which is what makes a stalled UDP client still detectable.
-async fn write_feed(
-    mut writer: BufWriter<tokio::net::tcp::OwnedWriteHalf>,
+async fn write_feed<S: AsyncWrite + Send + 'static>(
+    mut writer: BufWriter<WriteHalf<S>>,
     mut outbox: mpsc::Receiver<Arc<str>>,
     state: Arc<ServerState>,
     udp_feed: Option<crate::udp::UdpFeed>,
@@ -465,8 +468,8 @@ async fn write_feed(
 }
 
 /// Read the client's submissions until the connection closes.
-async fn read_submissions(
-    lines: &mut FramedRead<tokio::net::tcp::OwnedReadHalf, LineCodec>,
+async fn read_submissions<S: AsyncRead>(
+    lines: &mut FramedRead<ReadHalf<S>, LineCodec>,
     client: &Client,
     listener: &ListenerContext,
     state: &ServerState,
@@ -589,8 +592,8 @@ fn apply_filter_command(client: &Client, listener: &ListenerContext, expression:
 }
 
 /// Write one line with the CR/LF terminator APRS-IS requires, and flush.
-async fn write_line(
-    writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
+async fn write_line<S: AsyncWrite>(
+    writer: &mut BufWriter<WriteHalf<S>>,
     line: &str,
 ) -> std::io::Result<()> {
     write_line_buffered(writer, line).await?;
@@ -598,8 +601,8 @@ async fn write_line(
 }
 
 /// Write one line without flushing.
-async fn write_line_buffered(
-    writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
+async fn write_line_buffered<S: AsyncWrite>(
+    writer: &mut BufWriter<WriteHalf<S>>,
     line: &str,
 ) -> std::io::Result<()> {
     writer.write_all(line.as_bytes()).await?;
@@ -619,6 +622,7 @@ mod tests {
             forced_filter: forced.map(|f| FilterChain::parse(f).expect("valid filter")),
             max_clients: None,
             hidden: false,
+            tls: None,
         }
     }
 

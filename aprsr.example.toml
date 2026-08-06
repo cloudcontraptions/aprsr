@@ -162,6 +162,33 @@ max_clients = 1000
 # protocol = "udp"
 # bind = "[::]:8080"
 
+# A TLS port. APRS-IS carries public data — positions and weather reports that are
+# broadcast over the air by design — so this is not about the packets. It is about the
+# login line, which carries a passcode, and about a client on a hostile network being
+# able to tell that the server it reached is the one it meant to.
+#
+# It has to be a separate port: TLS and plaintext cannot share one, and every APRS-IS
+# client in existence expects the well-known ports to be plaintext. There is no
+# registered TLS port for APRS-IS, so 24580 here is simply "14580 plus ten thousand" —
+# pick whatever suits your firewall.
+#
+# `cert` is the full chain, leaf first and then the intermediates that chain it to a root
+# — what Let's Encrypt calls fullchain.pem. A file with only the leaf in it works against
+# a client that already has the intermediate cached and fails everywhere else, which is
+# the classic TLS deployment bug.
+#
+# `key` may be PKCS#8, PKCS#1 or SEC1. Both files are read and checked when the server
+# binds, so a bad path or a mismatched pair stops startup with the filename in the
+# message rather than failing the first connection at three in the morning.
+#
+# On Windows use single quotes: 'C:\ProgramData\aprsr\fullchain.pem'.
+#
+# [[listen]]
+# name = "Secure client port"
+# kind = "igate"
+# bind = "[::]:24580"
+# tls = { cert = "/etc/letsencrypt/live/aprs.example.net/fullchain.pem", key = "/etc/letsencrypt/live/aprs.example.net/privkey.pem" }
+
 # --- Access control -------------------------------------------------------------------
 #
 # Who may connect, who may log in, and how fast one client may talk. All of it is here
@@ -230,3 +257,35 @@ max_clients = 1000
 # name = "Core rotate"
 # kind = "readonly"
 # address = "rotate.aprs.net:10152"
+
+# An uplink over TLS. Present at all — even as an empty `tls = {}` — turns it on.
+#
+# The upstream server's certificate is verified against the Mozilla root store, which is
+# compiled into the binary as data rather than read from the operating system. That is
+# three different mechanisms across Linux, macOS and Windows, and it would make an
+# uplink's trust decisions depend on which host it happened to be running on.
+#
+# There is deliberately no option to skip verification. A qAS construct naming a server
+# aprsr did not actually authenticate is not a local mistake — it is wrong information
+# injected into the whole network, where nobody can tell it was this server that did it.
+#
+# [[uplink]]
+# name = "Secure core"
+# kind = "readonly"
+# address = "t2finland.aprs2.net:24152"
+# tls = {}
+
+# On a closed network with a private certificate authority, point `ca_file` at it. That
+# store replaces the built-in roots rather than adding to them: a network that meant to
+# trust one authority should not silently keep trusting a hundred public ones.
+#
+# `server_name` is the name the certificate is checked against, needed when connecting by
+# IP address or through a tunnel whose hostname differs from the certificate's. Left
+# unset it is the host part of `address`, which is what an operator writing a hostname
+# means. A bare IPv6 literal always needs it set explicitly.
+#
+# [[uplink]]
+# name = "Site B"
+# kind = "full"
+# address = "10.0.0.7:24152"
+# tls = { ca_file = "/etc/aprsr/site-ca.pem", server_name = "aprs.site-b.internal" }

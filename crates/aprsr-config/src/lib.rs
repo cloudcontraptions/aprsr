@@ -427,6 +427,13 @@ pub struct Listener {
     /// Hide this port from the public status page.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// Wrap connections to this port in TLS.
+    ///
+    /// A separate port rather than a mode on an existing one, because it has to be: TLS and
+    /// plaintext cannot share a listener, and every APRS-IS client in existence expects the
+    /// well-known ports to be plaintext.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<ListenerTls>,
     /// Whether an IPv6 bind should also accept IPv4 connections.
     ///
     /// Only meaningful when `bind` is an IPv6 address; ignored otherwise. Left unset it
@@ -441,6 +448,12 @@ pub struct Listener {
 }
 
 impl Listener {
+    /// Whether connections to this port are wrapped in TLS.
+    #[must_use]
+    pub const fn is_tls(&self) -> bool {
+        self.tls.is_some()
+    }
+
     /// Whether this listener should accept IPv4 connections on an IPv6 socket.
     ///
     /// Meaningless for an IPv4 bind, where it is always false.
@@ -448,6 +461,44 @@ impl Listener {
     pub fn wants_dual_stack(&self) -> bool {
         self.bind.is_ipv6() && self.dual_stack.unwrap_or(true)
     }
+}
+
+/// TLS on a listening port.
+///
+/// APRS-IS carries public data, so this is not about the packets: it is about the login
+/// line, which carries a passcode, and about a client on a hostile network being able to
+/// tell that the server it reached is the one it meant to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListenerTls {
+    /// The certificate chain, in PEM. Leaf first, then the intermediates that chain it to a
+    /// root — what Let's Encrypt calls `fullchain.pem`. A file with only the leaf in it works
+    /// against a client that already has the intermediate and fails everywhere else.
+    pub cert: PathBuf,
+    /// The private key, in PEM. PKCS#8, PKCS#1 and SEC1 are all accepted.
+    pub key: PathBuf,
+}
+
+/// TLS on an outbound uplink.
+///
+/// Present at all — even as an empty table — means "connect with TLS".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UplinkTls {
+    /// Verify the upstream server against this bundle *instead of* the built-in roots.
+    ///
+    /// Instead, not in addition: a closed network that meant to trust one authority should
+    /// not silently keep trusting a hundred public ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_file: Option<PathBuf>,
+    /// The name to verify the certificate against, when it is not the one in `address`.
+    ///
+    /// Needed when connecting by IP address, or through a tunnel whose hostname differs from
+    /// the certificate's. There is deliberately no option to skip verification altogether:
+    /// a `qAS` construct naming a server aprsr did not actually authenticate is wrong
+    /// information injected into the whole network, and "just this once" is how that ships.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
 }
 
 /// How much traffic to take from an uplink.
@@ -468,6 +519,31 @@ pub struct Uplink {
     pub kind: UplinkKind,
     /// `host:port`, resolved at connection time so DNS rotations keep working.
     pub address: String,
+    /// Connect with TLS. Present at all — `tls = {}` — turns it on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<UplinkTls>,
+}
+
+impl Uplink {
+    /// The name the upstream server's certificate is verified against.
+    ///
+    /// `server_name` when set, otherwise the host part of `address` — which is what an
+    /// operator writing `rotate.aprs.net:24152` means, and the only thing a DNS rotation
+    /// could sensibly be verified as.
+    #[must_use]
+    pub fn tls_server_name(&self) -> Option<&str> {
+        let tls = self.tls.as_ref()?;
+        Some(match tls.server_name.as_deref() {
+            Some(name) => name,
+            // Splitting on the last colon leaves a bracketed IPv6 literal intact, which is
+            // then not a valid DNS name — correctly, since a certificate for one needs an
+            // explicit `server_name` anyway.
+            None => self
+                .address
+                .rsplit_once(':')
+                .map_or(self.address.as_str(), |(host, _)| host),
+        })
+    }
 }
 
 impl Config {

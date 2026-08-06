@@ -281,7 +281,7 @@ bind = "[::]:0"
 
     fn state() -> Arc<ServerState> {
         let config = Config::from_toml(CONFIG).expect("valid test configuration");
-        Arc::new(ServerState::new(Arc::new(config), None))
+        Arc::new(ServerState::new(Arc::new(config), None).expect("valid test state"))
     }
 
     fn ingest(line: &str, login: &str) -> Ingest {

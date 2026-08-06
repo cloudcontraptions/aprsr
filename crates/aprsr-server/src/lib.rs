@@ -24,6 +24,7 @@ pub mod listener;
 pub mod metrics;
 pub mod registry;
 pub mod reload;
+pub mod tls;
 pub mod udp;
 pub mod uplink;
 
@@ -64,6 +65,23 @@ pub enum ServerError {
     },
     #[error("no TCP listeners are configured; the server would accept no connections")]
     NoTcpListeners,
+    #[error("listener {listener:?} cannot use TLS: {source}")]
+    Tls {
+        listener: String,
+        #[source]
+        source: Box<tls::TlsError>,
+    },
+    #[error("uplink {uplink:?} cannot use TLS: {source}")]
+    UplinkTls {
+        uplink: String,
+        #[source]
+        source: Box<tls::TlsError>,
+    },
+    #[error(
+        "uplink {uplink:?} cannot verify a server called {name:?}: that is not a valid DNS name. \
+         Set `server_name` to the name on the upstream server's certificate."
+    )]
+    UplinkServerName { uplink: String, name: String },
     #[error("storage error: {0}")]
     Store(#[from] aprsr_store::StoreError),
 }
@@ -231,11 +249,14 @@ const PACKET_EVENT_BACKLOG: usize = 256;
 
 impl ServerState {
     /// Build state for a configuration, with an optional database behind it.
-    #[must_use]
-    pub fn new(config: Arc<Config>, store: Option<Store>) -> Self {
-        Self {
+    ///
+    /// Fails only on an uplink whose TLS settings cannot be resolved — a CA bundle that
+    /// cannot be read, or a server name that is not a name. Both are configuration mistakes
+    /// and belong at startup rather than in a reconnect loop.
+    pub fn new(config: Arc<Config>, store: Option<Store>) -> Result<Self, ServerError> {
+        Ok(Self {
             server_id: Arc::from(config.server.id.as_str()),
-            uplinks: Arc::new(uplink::UplinkRegistry::from_config(&config.uplinks)),
+            uplinks: Arc::new(uplink::UplinkRegistry::from_config(&config.uplinks)?),
             udp_out: None,
             access: Arc::new(Access::from_config(&config.access)),
             config: std::sync::RwLock::new(config),
@@ -246,7 +267,7 @@ impl ServerState {
             store,
             started_at: now_secs(),
             packet_events: tokio::sync::broadcast::Sender::new(PACKET_EVENT_BACKLOG),
-        }
+        })
     }
 
     /// Subscribe to the live packet feed.
@@ -367,7 +388,7 @@ impl Server {
         config_path: Option<&std::path::Path>,
     ) -> Result<Self, ServerError> {
         let listeners = listener::bind_all(&config)?;
-        let mut state = ServerState::new(Arc::clone(&config), store);
+        let mut state = ServerState::new(Arc::clone(&config), store)?;
         if let Some(path) = config_path {
             state = state.with_config_path(path);
         }
@@ -541,9 +562,26 @@ async fn accept_loop(
         };
 
         match accepted {
-            Ok((socket, _peer)) => {
-                tokio::spawn(client::serve(
+            Ok((socket, peer)) => {
+                // Everything that can refuse this connection happens here, before a task is
+                // spawned and before any TLS handshake — which is the expensive part, and
+                // the part an attacker would most like to make the server do.
+                if !state.access.permits(peer.ip()) {
+                    metrics::Metrics::incr(&state.metrics.connections_refused);
+                    tracing::debug!(%peer, listener = %context.name, "refusing a blocked address");
+                    continue;
+                }
+
+                // Disable Nagle: APRS packets are small and latency-sensitive, and
+                // coalescing them into larger segments only adds delay. Set on the TCP
+                // socket itself, before any wrapper hides it.
+                if let Err(error) = socket.set_nodelay(true) {
+                    tracing::debug!(%error, %peer, "could not disable Nagle's algorithm");
+                }
+
+                tokio::spawn(serve_connection(
                     socket,
+                    peer,
                     Arc::clone(&context),
                     Arc::clone(&state),
                     dispatcher.clone(),
@@ -561,6 +599,60 @@ async fn accept_loop(
 
     tracing::debug!(listener = %context.name, "accept loop finished");
 }
+
+/// Complete the TLS handshake if the port has one, then serve the connection.
+///
+/// The two arms hand `client::serve` different concrete types and it is generic over both,
+/// so a TLS client and a plaintext one go through identical code from the banner onward.
+/// That is the point: a second implementation of the APRS-IS handshake, reached only by
+/// whoever configured a TLS port, is a second implementation nobody would notice diverging.
+async fn serve_connection(
+    socket: tokio::net::TcpStream,
+    peer: SocketAddr,
+    context: Arc<ListenerContext>,
+    state: Arc<ServerState>,
+    dispatcher: Dispatcher,
+    mut shutdown: Shutdown,
+) {
+    let Some(acceptor) = context.tls.clone() else {
+        client::serve(socket, peer, context, state, dispatcher, shutdown).await;
+        return;
+    };
+
+    // Bounded, because a handshake that never completes is a connection slot held open for
+    // free — the cheapest denial of service there is against a TLS port. Fifteen seconds is
+    // long for a handshake and short for a hostage: a plaintext client that sends an APRS-IS
+    // login to a TLS port reads as a record header claiming tens of kilobytes still to come,
+    // and rustls will wait for every one of them.
+    //
+    // Raced against shutdown as well as the clock, because this task holds a [`Dispatcher`]
+    // clone and the dispatch task ends only when the last one is dropped. Without the race,
+    // one stalled handshake would hold the whole server's shutdown for the full timeout.
+    let handshake = tokio::select! {
+        result = tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(socket)) => result,
+        () = shutdown.wait() => {
+            tracing::debug!(%peer, listener = %context.name, "abandoning a TLS handshake to shut down");
+            return;
+        }
+    };
+
+    match handshake {
+        Ok(Ok(stream)) => {
+            client::serve(stream, peer, context, state, dispatcher, shutdown).await;
+        }
+        Ok(Err(error)) => {
+            // Routine: a port scanner, a client speaking plaintext to a TLS port, a browser
+            // that gave up on the certificate. Debug rather than warn.
+            tracing::debug!(%peer, listener = %context.name, %error, "TLS handshake failed");
+        }
+        Err(_) => {
+            tracing::debug!(%peer, listener = %context.name, "TLS handshake timed out");
+        }
+    }
+}
+
+/// How long a client has to complete the TLS handshake.
+const TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[cfg(test)]
 mod tests {

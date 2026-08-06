@@ -57,6 +57,28 @@ rather than dropped — the connection stays usable read-only, which is what a m
 client needs in order to diagnose itself. Either way, **only verified clients may inject
 packets**; unverified submissions are counted and dropped.
 
+### TLS
+
+Not part of the APRS-IS specification, which describes a plaintext protocol on well-known
+ports. aprsr offers it as an additional port kind rather than a change to any documented one:
+a `[[listen]]` with a `tls` block speaks exactly the handshake above, wrapped in TLS, and
+every other port stays plaintext. Nothing in the protocol changes — the login line, the
+comment lines, the framing and the q algorithm are identical, and a client cannot tell which
+transport it is on except by having dialled it.
+
+What it protects is the login line, which carries a passcode in the clear, and the client's
+ability to know it reached the server it meant to. The packets themselves are public data
+broadcast over the air by design, and encrypting them is not the point.
+
+There is no registered TLS port for APRS-IS. `aprsr.example.toml` suggests 24580 and 24152 —
+the familiar numbers plus ten thousand — purely as a convention that does not collide with
+anything.
+
+An uplink may also dial out over TLS, and always verifies the upstream certificate. That is
+not configurable: the identity aprsr takes off an upstream handshake goes into every `qAS`
+construct for traffic arriving over that link, so a server it did not authenticate would be
+wrong information injected into the whole network.
+
 ## q constructs
 
 Two algorithms, not one. Which runs is decided by where the packet came from, and by nothing

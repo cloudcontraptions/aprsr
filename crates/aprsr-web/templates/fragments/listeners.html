@@ -29,7 +29,16 @@
         <tr class="bg-slate-900/20">
           <td class="px-4 py-2 text-slate-200">{{ listener.name }}</td>
           <td class="px-4 py-2 text-slate-400">{{ listener.kind }}</td>
-          <td class="px-4 py-2 font-mono text-xs text-slate-400">{{ listener.bind }}</td>
+          <td class="px-4 py-2 font-mono text-xs text-slate-400">
+            {{ listener.bind }}
+            {% if listener.tls %}
+            <span
+              class="ml-2 rounded bg-emerald-500/10 px-1.5 py-0.5 font-sans text-[10px] font-semibold uppercase tracking-wide text-emerald-400"
+              title="Connections to this port are wrapped in TLS"
+              >TLS</span
+            >
+            {% endif %}
+          </td>
           <td class="px-4 py-2 font-mono text-slate-300">{{ listener.clients }}</td>
           <td class="px-4 py-2 font-mono text-xs text-slate-400">{{ listener.filter }}</td>
         </tr>

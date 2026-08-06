@@ -12,8 +12,8 @@ suppresses duplicate transmissions, and delivers each client exactly the slice o
 its filters ask for.
 
 > **Early days.** The protocol core is implemented and covered by tests, the server runs,
-> and it uplinks to the rest of APRS-IS. Peer groups and TLS are not in yet — see
-> [`docs/roadmap.md`](docs/roadmap.md) for exactly what works today.
+> and it uplinks to the rest of APRS-IS over plain TCP or TLS. Peer groups are not in yet —
+> see [`docs/roadmap.md`](docs/roadmap.md) for exactly what works today.
 
 ## Getting started
 
@@ -74,10 +74,11 @@ reported on stderr rather than dropped silently.
 | **Uplinks** | Outbound links to other servers, `full` or `readonly`, with DNS rotation, backoff and failover |
 | **UDP** | `udpsubmit` ingest, and feed delivery to clients that ask for it with `UDP <port>` |
 | **Access control** | CIDR allow/deny lists, a callsign blocklist, and a per-client rate limit |
+| **TLS** | Listening ports and outbound uplinks, over rustls, with the upstream certificate always verified |
 | **Persistence** | SQLite via SeaORM: station positions, connection log, sampled counters |
 | **Web** | Live dashboard with a station map, history charts and a searchable client table, plus `status.json`, `/metrics` and `/healthz` |
 
-Not yet: peer links, TLS, SCTP, and byte-transparent handling of non-UTF-8 payloads. All
+Not yet: peer links, SCTP, and byte-transparent handling of non-UTF-8 payloads. All
 of it is in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Layout

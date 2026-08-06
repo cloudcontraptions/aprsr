@@ -47,8 +47,11 @@ pub(crate) fn check_config(path: &Path) -> Result<()> {
             .as_deref()
             .map(|f| format!("  filter {f}"))
             .unwrap_or_default();
+        // Worth stating outright. "Is 24580 the encrypted one?" is a question an operator
+        // should be able to answer from this output rather than by reading the file back.
+        let tls = if listener.is_tls() { "  TLS" } else { "" };
         println!(
-            "    {:<28} {:?} {:?} on {}{filter}{hidden}",
+            "    {:<28} {:?} {:?} on {}{tls}{filter}{hidden}",
             listener.name, listener.kind, listener.protocol, listener.bind
         );
     }
@@ -57,8 +60,12 @@ pub(crate) fn check_config(path: &Path) -> Result<()> {
         println!();
         println!("  uplinks:");
         for uplink in &config.uplinks {
+            let tls = match uplink.tls_server_name() {
+                Some(name) => format!("  TLS, verifying {name}"),
+                None => String::new(),
+            };
             println!(
-                "    {:<28} {:?} {}",
+                "    {:<28} {:?} {}{tls}",
                 uplink.name, uplink.kind, uplink.address
             );
         }

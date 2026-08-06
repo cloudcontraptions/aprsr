@@ -19,7 +19,9 @@ serde.workspace = true
 socket2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tokio-util.workspace = true
+webpki-roots.workspace = true
 tracing.workspace = true
 
 # `limits.file_limit` has no Windows equivalent to apply, so the crate that applies it is
@@ -30,6 +32,7 @@ rlimit.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 rstest.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

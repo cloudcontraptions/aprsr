@@ -52,7 +52,16 @@
             >
             {% endif %}
           </td>
-          <td class="px-4 py-2 font-mono text-xs text-slate-400">{{ uplink.address }}</td>
+          <td class="px-4 py-2 font-mono text-xs text-slate-400">
+            {{ uplink.address }}
+            {% if uplink.tls %}
+            <span
+              class="ml-2 rounded bg-emerald-500/10 px-1.5 py-0.5 font-sans text-[10px] font-semibold uppercase tracking-wide text-emerald-400"
+              title="This link dials out over TLS and verifies the upstream certificate"
+              >TLS</span
+            >
+            {% endif %}
+          </td>
           <td class="px-4 py-2 text-slate-400">{{ uplink.kind }}</td>
           {#- The peer's callsign is what goes into a qAS construct for anything arriving
               over this link, so it is worth showing beside the address that produced it —
