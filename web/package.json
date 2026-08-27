@@ -20,9 +20,9 @@
   },
   "devDependencies": {
     "@tailwindcss/cli": "4.3.3",
-    "esbuild": "0.28.1",
+    "esbuild": "0.28.2",
     "tailwindcss": "4.3.3",
     "typescript": "7.0.2",
-    "vitest": "4.1.10"
+    "vitest": "4.1.11"
   }
 }
